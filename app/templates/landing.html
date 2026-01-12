@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DNA QR Auth</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="card">
+    <h1>Sign in with DNA</h1>
+    <p><b>Origin:</b> {{ origin }}</p>
+    <p><b>Session:</b> <code>{{ session_id }}</code></p>
+
+    <div class="qr">{{ qr_svg|safe }}</div>
+
+    <p class="hint">Open DNA-Messenger → QR Reader → scan this code.</p>
+
+    <div id="status" class="status">Waiting for approval…</div>
+  </div>
+
+  <script>
+    const sid = "{{ session_id }}";
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
