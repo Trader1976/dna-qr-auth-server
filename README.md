@@ -25,70 +25,64 @@ The browser session is approved **without passwords, cookies, or shared secrets*
 ---
 
 ## 🧠 How it works (high level)
-## 🔁 QR Auth flow (sequence diagram)
+This server implements a device-mediated, post-quantum authentication flow using QR codes and native PQClean signature verification.
 
-```mermaid
+A browser session is authenticated only after a mobile device cryptographically approves it.
+No passwords, cookies, or shared secrets are used.
+
 sequenceDiagram
     autonumber
-    participant B as Browser (User)
-    participant W as Web Server (FastAPI)
-    participant S as Session Store (in-memory)
-    participant Q as QR (dna:// payload)
+
+    participant B as Browser
+    participant W as FastAPI Server
+    participant S as Session Store
     participant M as DNA-Messenger (Phone)
-    participant V as Native Verifier (PQClean ML-DSA-87)
+    participant V as Native Verifier (PQClean)
 
     B->>W: GET /
     W->>S: create_session(origin, ttl)
-    S-->>W: session_id, challenge, issued_at, expires_at
-    W-->>B: landing.html (contains session_id + QR URL)
+    S-->>W: session_id, issued_at, expires_at
+    W-->>B: landing.html (session_id + QR)
 
     B->>W: GET /api/v1/session/{sid}/qr.svg
-    W->>S: get(sid)
-    S-->>W: sess.qr_uri
-    W->>Q: render QR from sess.qr_uri
-    W-->>B: qr.svg
+    W->>S: get_session(sid)
+    S-->>W: qr_uri
+    W-->>B: SVG QR code
 
-    Note over B,M: User scans QR on the phone
+    Note over B,M: User scans QR code with phone
 
-    M->>W: (optional) GET /api/v1/session/{sid}/challenge
-    W->>S: get(sid)
-    S-->>W: challenge + metadata
-    W-->>M: challenge payload
+    M->>M: Parse QR payload
+    M->>M: Build canonical JSON payload
+    M->>M: Sign payload with ML-DSA-87
+    M->>M: Compute fingerprint = SHA3-512(pubkey)
 
-    M->>M: Build canonical JSON string
-    Note over M: canonical = {"expires_at":...,"issued_at":...,"nonce":"...","origin":"...","session_id":"..."}
-    M->>M: signature = ML-DSA-87 sign(canonical_bytes)
-    M->>M: pubkey_b64 + fingerprint = SHA3-512(pubkey).hex
-
-    M->>W: POST /api/v1/session/{sid}/complete<br/>{"type":"dna.auth.response","v":1,...}
-    W->>S: get(sid) + validate pending/ttl
-    W->>W: Validate fields + origin/session_id + nonce replay
-    W->>W: Compute fingerprint = SHA3-512(pubkey).hex
-    W->>W: Compare claimed_fp == computed_fp (fail-closed)
-    W->>V: verify_mldsa87_signature(pubkey, canonical_bytes, signature)
-    V-->>W: ok / fail
+    M->>W: POST /api/v1/session/{sid}/complete
+    W->>S: validate session state
+    W->>W: validate origin, timestamps, nonce
+    W->>W: fingerprint == SHA3-512(pubkey)
+    W->>V: verify signature (native PQClean)
+    V-->>W: verification result
 
     alt signature valid
-        W->>S: save_response(... verified=true ...)
         W->>S: set_status(APPROVED)
-        W-->>M: 200 {"ok": true}
-    else signature invalid
+        W-->>M: 200 OK
+    else invalid
         W->>S: set_status(DENIED)
-        W-->>M: 403 invalid signature
+        W-->>M: 403 Forbidden
     end
 
     loop Browser polling
         B->>W: GET /api/v1/session/{sid}
-        W->>S: get(sid)
-        S-->>W: status (pending/approved/denied/expired)
+        W->>S: get_status
+        S-->>W: status
         W-->>B: status JSON
     end
 
     alt approved
         B->>W: GET /success
         W-->>B: success.html
-    else denied/expired
-        W-->>B: show failed state
+    else denied or expired
+        W-->>B: failure state
     end
 
 
