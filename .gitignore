@@ -22,3 +22,6 @@ build/
 logs/
 app/*.log
 audit/
+
+# Identity allowlist (contains sensitive fingerprints)
+app/known_identities.json
