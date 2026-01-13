@@ -1,22 +1,16 @@
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
-from fastapi.responses import Response
-from fastapi.staticfiles import StaticFiles
-from fastapi import Body
-from .identity import verify_mldsa87_signature
-
-import json
-from collections import OrderedDict
 import base64
 import hashlib
-from .storage import store, SessionStatus
-from .identity import resolve_pubkey_from_fingerprint
+
+from fastapi import FastAPI, Request, HTTPException, Body
+from fastapi.responses import HTMLResponse, Response
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .storage import store, SessionStatus
-from .qr import make_auth_qr_svg_bytes, make_auth_qr_svg
+from .qr import make_auth_qr_svg_bytes
+from .identity import verify_mldsa87_signature
 
 
 app = FastAPI(title="DNA QR Auth Server", version="0.1.0")
@@ -26,51 +20,36 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
-def b64decode_strict(s: str) -> bytes:
-    # standard base64 with optional padding
-    try:
-        return base64.b64decode(s, validate=True)
-    except Exception:
-        # allow missing padding (some libs omit it)
-        pad = '=' * (-len(s) % 4)
-        return base64.b64decode(s + pad)
-
-
 def _b64decode_loose(s: str) -> bytes:
     """
-    Base64 decode that accepts missing padding and rejects non-base64 chars.
-    DNA-Messenger uses standard base64 (base64Encode in Dart).
+    Accept standard Base64 with optional padding.
+    DNA-Messenger uses Dart base64Encode() which is standard Base64 (not urlsafe).
     """
     s = str(s).strip()
-    # add padding if missing
     s += "=" * (-len(s) % 4)
-    try:
-        return base64.b64decode(s, validate=True)
-    except Exception:
-        raise ValueError("invalid base64")
+    return base64.b64decode(s, validate=True)
+
 
 def _fingerprint_from_pubkey(pubkey: bytes) -> str:
-    # DNA fingerprints in your app are 128 hex chars -> sha3_512 hex
+    """
+    DNA fingerprints are 128 hex chars, derived from SHA3-512(pubkey).
+    """
     return hashlib.sha3_512(pubkey).hexdigest()
 
-
-def fp_from_pubkey(pubkey: bytes) -> str:
-    # DNA fingerprint appears to be SHA3-512 hex (128 chars)
-    # This matches your earlier fingerprints being 128 hex chars.
-    return hashlib.sha3_512(pubkey).hexdigest()
 
 @app.get("/", response_class=HTMLResponse)
 def landing(request: Request):
     sess = store.create_session(origin=settings.ORIGIN, ttl_seconds=settings.SESSION_TTL_SECONDS)
-    return templates.TemplateResponse("landing.html", {
-        "request": request,
-        "origin": settings.ORIGIN,
-        "session_id": sess.session_id,
-        "expires_at": sess.expires_at,
-    })
+    return templates.TemplateResponse(
+        "landing.html",
+        {
+            "request": request,
+            "origin": settings.ORIGIN,
+            "session_id": sess.session_id,
+            "expires_at": sess.expires_at,
+        },
+    )
 
-
-import json
 
 @app.get("/api/v1/session/{session_id}/qr.svg")
 def session_qr_svg(session_id: str):
@@ -90,7 +69,6 @@ def get_challenge(session_id: str):
         store.set_status(sess.session_id, SessionStatus.EXPIRED)
         raise HTTPException(410, "session expired")
 
-    # Minimal fields for phone to sign
     return {
         "v": 1,
         "session_id": sess.session_id,
@@ -101,51 +79,6 @@ def get_challenge(session_id: str):
         "issued_at": sess.issued_at,
         "expires_at": sess.expires_at,
     }
-
-
-def canonical_signing_string(
-    session_id: str,
-    challenge: str,
-    decision: str,
-    fingerprint: str,
-    display_name: str,
-    iat: int,
-    exp: int,
-    nonce: str,
-    scopes: list[str],
-) -> bytes:
-    if "\n" in display_name:
-        raise ValueError("display_name contains newline")
-    scopes_csv = ",".join(sorted(scopes))
-    s = (
-        "DNA-AUTH-V1\n"
-        f"session_id={session_id}\n"
-        f"challenge={challenge}\n"
-        f"decision={decision}\n"
-        f"fingerprint={fingerprint}\n"
-        f"display_name={display_name}\n"
-        f"iat={iat}\n"
-        f"exp={exp}\n"
-        f"nonce={nonce}\n"
-        f"scopes={scopes_csv}\n"
-    )
-    return s.encode("utf-8")
-
-
-from fastapi import Body
-
-from fastapi import Body, HTTPException
-import base64
-import oqs
-
-from .storage import store, SessionStatus
-from .identity import resolve_pubkey_from_fingerprint
-
-
-def verify_dilithium5(pubkey: bytes, message: bytes, signature: bytes) -> bool:
-    with oqs.Signature("Dilithium5") as verifier:
-        return verifier.verify(message, signature, pubkey)
-
 
 
 @app.post("/api/v1/session/{session_id}/complete")
@@ -165,6 +98,7 @@ def complete(session_id: str, body: dict = Body(...)):
     if int(body.get("v", 0)) != 1:
         raise HTTPException(400, "invalid version")
 
+    # Required fields (client sends pubkey now)
     for k in ("session_id", "fingerprint", "signature", "signed_payload", "pubkey_b64"):
         if k not in body:
             raise HTTPException(400, f"missing field: {k}")
@@ -183,6 +117,7 @@ def complete(session_id: str, body: dict = Body(...)):
     if signed_payload["session_id"] != session_id:
         raise HTTPException(400, "signed_payload.session_id mismatch")
 
+    # origin must match what the server issued for this session
     if str(signed_payload["origin"]).rstrip("/") != sess.origin.rstrip("/"):
         raise HTTPException(400, "origin mismatch")
 
@@ -202,7 +137,7 @@ def complete(session_id: str, body: dict = Body(...)):
     if store.seen_nonce(sess.session_id, nonce):
         raise HTTPException(409, "replay nonce")
 
-    # Canonical JSON EXACTLY like the app
+    # Canonical JSON MUST match the phone exactly (your app builds this string)
     origin = str(signed_payload["origin"])
     canonical = (
         f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
@@ -210,56 +145,48 @@ def complete(session_id: str, body: dict = Body(...)):
     )
     canonical_bytes = canonical.encode("utf-8")
 
-    # Decode base64
+    # Decode signature + pubkey
     try:
         signature = _b64decode_loose(body["signature"])
         pubkey = _b64decode_loose(body["pubkey_b64"])
     except Exception:
         raise HTTPException(400, "invalid base64 encoding")
 
-    # Fingerprint must match pubkey (authoritative check)
+    # Fingerprint must match pubkey (authoritative)
     claimed_fp = str(body["fingerprint"]).lower().strip()
     computed_fp = _fingerprint_from_pubkey(pubkey)
     if claimed_fp != computed_fp:
         store.set_status(sess.session_id, SessionStatus.DENIED)
-        print("QR_AUTH DEBUG fingerprint/pubkey mismatch",
-              "claimed_fp=", claimed_fp[:16],
-              "computed_fp=", computed_fp[:16],
-              "pubkey_len=", len(pubkey),
-              "sig_len=", len(signature))
         raise HTTPException(403, "fingerprint/pubkey mismatch")
 
-    # ---- VERIFY USING NATIVE LIB (the only correct method) ----
+    # Verify (native PQClean / ML-DSA-87)
     try:
         ok = verify_mldsa87_signature(pubkey, canonical_bytes, signature)
     except Exception as e:
         store.set_status(sess.session_id, SessionStatus.DENIED)
-        print("QR_AUTH DEBUG verifier exception:", repr(e))
-        raise HTTPException(500, "verifier error")
+        raise HTTPException(500, f"verifier error: {e!s}")
 
     if not ok:
         store.set_status(sess.session_id, SessionStatus.DENIED)
-        print("QR_AUTH DEBUG verify_failed canonical=", canonical,
-              "pubkey_len=", len(pubkey),
-              "sig_len=", len(signature),
-              "msg_len=", len(canonical_bytes))
         raise HTTPException(403, "invalid signature")
 
     # Success
-    store.save_response(sess.session_id, {
-        "v": 1,
-        "type": body["type"],
-        "session_id": session_id,
-        "fingerprint": claimed_fp,
-        "signature_b64": body["signature"],
-        "pubkey_b64": body["pubkey_b64"],
-        "signed_payload": signed_payload,
-        "server_canonical": canonical,
-        "verified": True,
-    })
+    store.save_response(
+        sess.session_id,
+        {
+            "v": 1,
+            "type": body["type"],
+            "session_id": session_id,
+            "fingerprint": claimed_fp,
+            "signature_b64": body["signature"],
+            "pubkey_b64": body["pubkey_b64"],
+            "signed_payload": signed_payload,
+            "server_canonical": canonical,
+            "verified": True,
+        },
+    )
     store.set_status(sess.session_id, SessionStatus.APPROVED)
     return {"ok": True}
-
 
 
 @app.get("/api/v1/session/{session_id}")
@@ -268,14 +195,12 @@ def session_status(session_id: str):
     if not sess:
         raise HTTPException(404, "session not found")
 
-    # auto-expire pending sessions
     if sess.is_expired and sess.status == SessionStatus.PENDING:
         store.set_status(sess.session_id, SessionStatus.EXPIRED)
 
     return sess.public_view()
 
+
 @app.get("/success", response_class=HTMLResponse)
 def success(request: Request):
-    return templates.TemplateResponse("success.html", {
-        "request": request,
-    })
+    return templates.TemplateResponse("success.html", {"request": request})
