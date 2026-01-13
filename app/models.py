@@ -7,4 +7,5 @@ class AuthCallback(BaseModel):
     session_id: str
     fingerprint: str
     signature: str
+    pubkey_b64: str
     signed_payload: Dict[str, Any]

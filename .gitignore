@@ -16,3 +16,8 @@ __pycache__/
 # Build artifacts
 dist/
 build/
+
+# --- Runtime / debug logs ---
+*.log
+logs/
+app/*.log

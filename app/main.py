@@ -11,6 +11,7 @@ from .config import settings
 from .storage import store, SessionStatus
 from .qr import make_auth_qr_svg_bytes
 from .identity import verify_mldsa87_signature
+from .audit import append_event, build_common
 
 
 # -----------------------------------------------------------------------------
@@ -141,7 +142,7 @@ def get_challenge(session_id: str):
 # QR authentication completion (CRITICAL PATH)
 # -----------------------------------------------------------------------------
 @app.post("/api/v1/session/{session_id}/complete")
-def complete(session_id: str, body: dict = Body(...)):
+def complete(session_id: str, request: Request, body: dict = Body(...)):
     """
     Completes a QR authentication session.
 
@@ -215,7 +216,25 @@ def complete(session_id: str, body: dict = Body(...)):
         raise HTTPException(400, "expires window too large")
 
     nonce = str(signed_payload["nonce"])
+    origin = str(signed_payload["origin"])
+    client_ip = (request.client.host if request.client else None)
+    user_agent = request.headers.get("user-agent")
+
     if store.seen_nonce(sess.session_id, nonce):
+        append_event(
+            {
+                **build_common(
+                    session_id=session_id,
+                    claimed_fp=str(body.get("fingerprint", "")).lower().strip() or None,
+                    origin=origin,
+                    nonce=nonce,
+                    request_ip=client_ip,
+                    user_agent=user_agent,
+                ),
+                "result": "denied",
+                "reason": "replay_nonce",
+            }
+        )
         raise HTTPException(409, "replay nonce")
 
     # -------------------------------------------------------------------------
@@ -224,7 +243,6 @@ def complete(session_id: str, body: dict = Body(...)):
     # MUST match the phone byte-for-byte.
     # Any difference here breaks signature verification.
     # -------------------------------------------------------------------------
-    origin = str(signed_payload["origin"])
     canonical = (
         f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
         f'"origin":"{origin}","session_id":"{session_id}"}}'
@@ -247,6 +265,23 @@ def complete(session_id: str, body: dict = Body(...)):
     computed_fp = _fingerprint_from_pubkey(pubkey)
 
     if claimed_fp != computed_fp:
+        append_event(
+            {
+                **build_common(
+                    session_id=session_id,
+                    claimed_fp=claimed_fp,
+                    pubkey_fp=computed_fp,
+                    canonical_bytes=canonical_bytes,
+                    signature_bytes=signature,
+                    origin=origin,
+                    nonce=nonce,
+                    request_ip=client_ip,
+                    user_agent=user_agent,
+                ),
+                "result": "denied",
+                "reason": "fingerprint_pubkey_mismatch",
+            }
+        )
         store.set_status(sess.session_id, SessionStatus.DENIED)
         raise HTTPException(403, "fingerprint/pubkey mismatch")
 
@@ -256,10 +291,45 @@ def complete(session_id: str, body: dict = Body(...)):
     try:
         ok = verify_mldsa87_signature(pubkey, canonical_bytes, signature)
     except Exception as e:
+        append_event(
+            {
+                **build_common(
+                    session_id=session_id,
+                    claimed_fp=claimed_fp,
+                    pubkey_fp=computed_fp,
+                    canonical_bytes=canonical_bytes,
+                    signature_bytes=signature,
+                    origin=origin,
+                    nonce=nonce,
+                    request_ip=client_ip,
+                    user_agent=user_agent,
+                ),
+                "result": "error",
+                "reason": "verifier_exception",
+                "detail": str(e)[:200],
+            }
+        )
         store.set_status(sess.session_id, SessionStatus.DENIED)
         raise HTTPException(500, f"verifier error: {e!s}")
 
     if not ok:
+        append_event(
+            {
+                **build_common(
+                    session_id=session_id,
+                    claimed_fp=claimed_fp,
+                    pubkey_fp=computed_fp,
+                    canonical_bytes=canonical_bytes,
+                    signature_bytes=signature,
+                    origin=origin,
+                    nonce=nonce,
+                    request_ip=client_ip,
+                    user_agent=user_agent,
+                ),
+                "result": "denied",
+                "reason": "invalid_signature",
+            }
+        )
         store.set_status(sess.session_id, SessionStatus.DENIED)
         raise HTTPException(403, "invalid signature")
 
@@ -279,6 +349,25 @@ def complete(session_id: str, body: dict = Body(...)):
             "server_canonical": canonical,
             "verified": True,
         },
+    )
+
+    append_event(
+        {
+            **build_common(
+                session_id=session_id,
+                claimed_fp=claimed_fp,
+                pubkey_fp=computed_fp,
+                canonical_bytes=canonical_bytes,
+                signature_bytes=signature,
+                origin=origin,
+                nonce=nonce,
+                request_ip=client_ip,
+                user_agent=user_agent,
+            ),
+            "result": "approved",
+            "reason": "signature_valid",
+            "alg": "ML-DSA-87",
+        }
     )
 
     store.set_status(sess.session_id, SessionStatus.APPROVED)
