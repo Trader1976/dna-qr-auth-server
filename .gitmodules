@@ -1,0 +1,6 @@
+[submodule "app/native/app/native/PQClean"]
+	path = app/native/app/native/PQClean
+	url = https://github.com/PQClean/PQClean.git
+[submodule "app/native/PQClean"]
+	path = app/native/PQClean
+	url = https://github.com/PQClean/PQClean.git
