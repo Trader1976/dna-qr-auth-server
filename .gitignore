@@ -21,3 +21,4 @@ build/
 *.log
 logs/
 app/*.log
+audit/
