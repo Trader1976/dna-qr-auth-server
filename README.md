@@ -183,6 +183,90 @@ You can override these via .env or docker-compose.yml.
 🚧 Formal protocol specification
 🚧 Scope-binding enforcement
 
+
+The QR Auth Server supports an optional identity allowlist using
+app/known_identities.json.
+
+This file controls which DNA identities are allowed to authenticate.
+location : app/known_identities.json
+
+🧠 How it works
+
+The server always performs full cryptographic verification:
+
+Fingerprint ↔ public key binding (SHA3-512)
+
+Post-quantum signature verification (ML-DSA-87 / Dilithium-class)
+
+After that, an optional policy check is applied:
+
+Allowlist state	Result
+File missing	✅ Open mode – any valid DNA identity may log in
+File exists, empty list	✅ Open mode – any valid DNA identity may log in
+File exists, contains fingerprints	🔒 Allowlist mode – only listed identities may log in
+File exists but malformed	❌ Fail-closed – all logins denied
+
+This means:
+Security is never bypassed
+The allowlist only restricts who may authenticate
+
+📄 File format
+✅ Empty allowlist (open mode)
+
+Anyone with a valid DNA identity can authenticate.
+{
+  "fingerprints": []
+}
+
+Use this when:
+    running a public service
+    testing
+    onboarding new users
+
+🔒 Allowlist with one identity
+
+Only the listed fingerprint is allowed.
+{
+  "fingerprints": [
+    "deadbeefdeadbeefdeadbe...dbeefdeadbeefdeadbeefdeadbeef…"
+  ]
+}
+
+
+    ⚠️ The fingerprint must be the full SHA3-512 hex string (128 characters).
+    The example above is fake and elided.
+
+Use this when:
+    protecting admin access
+    limiting access to a private service
+    running production infrastructure
+
+
+🧾 Audit logging
+
+All allowlist decisions are recorded in the signature audit log:
+
+approved
+
+identity_not_allowed
+fingerprint_pubkey_mismatch
+invalid_signature
+This provides a full forensic trail for authentication decisions.
+
+🔄 Updating the allowlist
+
+If the file is baked into the Docker image, you must rebuild:
+
+docker compose build --no-cache
+docker compose up -d
+
+
+If the file is bind-mounted, a container restart is enough:
+
+docker compose restart app
+
+
+
 This project is experimental and under active development.
 
 🔐 Security notes
