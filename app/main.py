@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .storage import store, SessionStatus
 from .qr import make_auth_qr_svg_bytes
-from .identity import verify_mldsa87_signature
+from .identity import verify_mldsa87_signature, is_fingerprint_allowed
 from .audit import append_event, build_common
 
 
@@ -239,9 +239,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
 
     # -------------------------------------------------------------------------
     # Canonical message reconstruction
-    #
-    # MUST match the phone byte-for-byte.
-    # Any difference here breaks signature verification.
     # -------------------------------------------------------------------------
     canonical = (
         f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
@@ -286,7 +283,38 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
         raise HTTPException(403, "fingerprint/pubkey mismatch")
 
     # -------------------------------------------------------------------------
-    # Cryptographic verification (native PQClean, ML-DSA-87)
+    # Optional allowlist (known identities)
+    # -------------------------------------------------------------------------
+    if not is_fingerprint_allowed(computed_fp):
+        append_event(
+            {
+                **build_common(
+                    session_id=session_id,
+                    claimed_fp=claimed_fp,
+                    pubkey_fp=computed_fp,
+                    canonical_bytes=canonical_bytes,
+                    signature_bytes=signature,
+                    origin=origin,
+                    nonce=nonce,
+                    request_ip=client_ip,
+                    user_agent=user_agent,
+                ),
+                "result": "denied",
+                "reason": "identity_not_allowed",
+            }
+        )
+        store.set_status(sess.session_id, SessionStatus.DENIED)
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_authorized",
+                "reason": "identity_not_allowed",
+                "message": "This DNA identity is not authorized for this service.",
+            },
+        )
+
+    # -------------------------------------------------------------------------
+    # Cryptographic verification (native PQClean)
     # -------------------------------------------------------------------------
     try:
         ok = verify_mldsa87_signature(pubkey, canonical_bytes, signature)
