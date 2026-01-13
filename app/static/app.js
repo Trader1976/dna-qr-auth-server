@@ -1,25 +1,59 @@
-async function poll() {
-  const res = await fetch(`/api/session/${sid}`);
-  if (!res.ok) return;
-  const data = await res.json();
-  const el = document.getElementById("status");
+(() => {
+  const sessionId = window.DNA_AUTH_SESSION_ID;
+  const statusEl = document.getElementById("status");
 
-  if (data.status === "approved") {
-    el.textContent = "Approved ✅";
-    el.className = "status ok";
-    return;
-  }
-  if (data.status === "denied") {
-    el.textContent = "Denied ❌";
-    el.className = "status bad";
-    return;
-  }
-  if (data.status === "expired") {
-    el.textContent = "Expired ⏳ Reload page.";
-    el.className = "status warn";
+  if (!sessionId) {
+    console.error("DNA_AUTH_SESSION_ID missing");
     return;
   }
 
-  setTimeout(poll, 1000);
-}
-poll();
+  let stopped = false;
+
+  async function poll() {
+    if (stopped) return;
+
+    try {
+      const res = await fetch(`/api/v1/session/${sessionId}`, {
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        statusEl.textContent = "Server error";
+        return;
+      }
+
+      const data = await res.json();
+      console.log("AUTH STATUS:", data);
+
+      switch (data.status) {
+        case "pending":
+          statusEl.textContent = "Waiting for approval…";
+          break;
+
+        case "approved":
+          stopped = true;              // 🔒 stop polling
+          statusEl.textContent = "Approved ✔";
+          window.location.replace("/success"); // 🚀 redirect
+          return;
+
+        case "denied":
+          stopped = true;
+          statusEl.textContent = "Denied";
+          return;
+
+        case "expired":
+          stopped = true;
+          statusEl.textContent = "Expired";
+          return;
+
+        default:
+          statusEl.textContent = `Unknown status: ${data.status}`;
+      }
+    } catch (e) {
+      console.error("Polling failed:", e);
+    }
+  }
+
+  poll();                    // run immediately
+  setInterval(poll, 1500);   // then poll
+})();

@@ -1,0 +1,119 @@
+:root {
+  --bg: #0b0f14;
+  --card: #111827;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+
+  --accent: #00eaff;   /* CPUNK cyan */
+  --accent2: #8b5cf6;  /* violet glow */
+  --success: #22c55e;
+  --danger: #ef4444;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background:
+    radial-gradient(1200px 600px at 20% -10%, rgba(0,234,255,0.08), transparent),
+    radial-gradient(800px 400px at 90% 10%, rgba(139,92,246,0.08), transparent),
+    var(--bg);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card {
+  background: linear-gradient(180deg, #0f172a, #020617);
+  border-radius: 14px;
+  padding: 28px 32px 32px;
+  width: 360px;
+  text-align: center;
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.04),
+    0 20px 60px rgba(0,0,0,0.6),
+    0 0 40px rgba(0,234,255,0.12);
+}
+
+.card.success {
+  box-shadow:
+    0 0 0 1px rgba(34,197,94,0.4),
+    0 0 40px rgba(34,197,94,0.25);
+}
+
+h1 {
+  margin-top: 0;
+  margin-bottom: 16px;
+  font-size: 1.4rem;
+  color: var(--accent);
+  text-shadow: 0 0 12px rgba(0,234,255,0.6);
+}
+
+.card.success h1 {
+  color: var(--success);
+  text-shadow: 0 0 12px rgba(34,197,94,0.6);
+}
+
+p {
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+code {
+  background: rgba(255,255,255,0.06);
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  color: var(--text);
+}
+
+.qr {
+  margin: 18px 0;
+}
+
+.qr img {
+  width: 220px;
+  height: 220px;
+  background: white;
+  padding: 10px;
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.1),
+    0 0 30px rgba(0,234,255,0.25);
+}
+
+.hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.status {
+  margin-top: 14px;
+  font-size: 0.9rem;
+  color: var(--accent2);
+  text-shadow: 0 0 8px rgba(139,92,246,0.6);
+}
+
+
+/* Minimal styling so the QR is visible 
+body { font-family: system-ui, sans-serif; }
+.card { max-width: 520px; margin: 40px auto; padding: 24px; border: 1px solid #ddd; border-radius: 12px; }
+.qr svg { display: block; margin: 16px auto; width: 280px; height: 280px; }
+.qr { text-align: center; }
+.status {
+  margin-top: 1rem;
+  font-weight: bold;
+}
+
+.status.pending { color: #888; }
+.status.approved { color: #2ecc71; }
+.status.denied { color: #e74c3c; }
+.status.expired { color: #e67e22; }
+.status.error { color: #c0392b; }*/
+

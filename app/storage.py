@@ -1,7 +1,13 @@
 import time, secrets
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
+
+
+def b64url_token(nbytes: int) -> str:
+    # token_urlsafe returns base64url-ish without padding; good enough for v1
+    return secrets.token_urlsafe(nbytes)
+
 
 class SessionStatus(str, Enum):
     PENDING = "pending"
@@ -9,14 +15,15 @@ class SessionStatus(str, Enum):
     DENIED = "denied"
     EXPIRED = "expired"
 
+
 @dataclass
 class Session:
     session_id: str
-    nonce: str
+    challenge: str
     origin: str
-    callback_url: str
     issued_at: int
     expires_at: int
+    nonce: str
     status: SessionStatus = SessionStatus.PENDING
     response: Optional[Dict[str, Any]] = None
 
@@ -25,27 +32,24 @@ class Session:
         return int(time.time()) >= self.expires_at
 
     @property
-    def qr_payload_json(self) -> str:
-        # This is what you encode in QR
-        # Your phone-side parser expects: origin, session_id, nonce, callback, expires_at (optional)
-        import json
-        payload = {
-            "type": "dna.auth.request",
-            "v": 1,
-            "origin": self.origin,
-            "session_id": self.session_id,
-            "nonce": self.nonce,
-            "callback": self.callback_url,
-            "issued_at": self.issued_at,
-            "expires_at": self.expires_at,
-        }
-        return json.dumps(payload, separators=(",", ":"))
+    def qr_uri(self) -> str:
+        base = self.origin.rstrip("/")
+        callback = f"{base}/api/v1/session/{self.session_id}/complete"
+        return (
+            "dna://auth?"
+            "v=1"
+            f"&origin={base}"
+            f"&session_id={self.session_id}"
+            f"&nonce={self.nonce}"
+            f"&callback={callback}"
+        )
 
     def public_view(self):
         st = self.status
         if self.is_expired and st == SessionStatus.PENDING:
             st = SessionStatus.EXPIRED
         return {
+            "v": 1,
             "session_id": self.session_id,
             "origin": self.origin,
             "status": st,
@@ -53,23 +57,27 @@ class Session:
             "expires_at": self.expires_at,
         }
 
+
 class InMemoryStore:
     def __init__(self):
         self.sessions: Dict[str, Session] = {}
+        self.nonces_seen: Dict[str, set[str]] = {}
 
-    def create_session(self, origin: str, ttl_seconds: int, callback_url: str) -> Session:
+    def create_session(self, origin: str, ttl_seconds: int) -> Session:
         now = int(time.time())
-        session_id = secrets.token_urlsafe(24)
-        nonce = secrets.token_urlsafe(18)
+        session_id = b64url_token(24)
+        challenge = b64url_token(32)
+        nonce = b64url_token(16)
         sess = Session(
             session_id=session_id,
-            nonce=nonce,
+            challenge=challenge,
             origin=origin,
-            callback_url=callback_url,
             issued_at=now,
             expires_at=now + ttl_seconds,
+            nonce=nonce,
         )
         self.sessions[session_id] = sess
+        self.nonces_seen[session_id] = set()
         return sess
 
     def get(self, session_id: str) -> Optional[Session]:
@@ -85,16 +93,14 @@ class InMemoryStore:
         if sess:
             sess.response = resp
 
-    def matches_issued_payload(self, session_id: str, signed_payload: Dict[str, Any]) -> bool:
-        sess = self.sessions.get(session_id)
-        if not sess:
-            return False
-        # must match these exactly:
-        return (
-            signed_payload.get("origin") == sess.origin and
-            signed_payload.get("session_id") == sess.session_id and
-            signed_payload.get("nonce") == sess.nonce and
-            int(signed_payload.get("expires_at", 0)) == sess.expires_at
-        )
+    def seen_nonce(self, session_id: str, nonce: str) -> bool:
+        s = self.nonces_seen.get(session_id)
+        if s is None:
+            return True
+        if nonce in s:
+            return True
+        s.add(nonce)
+        return False
+
 
 store = InMemoryStore()
