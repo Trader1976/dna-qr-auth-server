@@ -25,6 +25,73 @@ The browser session is approved **without passwords, cookies, or shared secrets*
 ---
 
 ## 🧠 How it works (high level)
+## 🔁 QR Auth flow (sequence diagram)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Browser (User)
+    participant W as Web Server (FastAPI)
+    participant S as Session Store (in-memory)
+    participant Q as QR (dna:// payload)
+    participant M as DNA-Messenger (Phone)
+    participant V as Native Verifier (PQClean ML-DSA-87)
+
+    B->>W: GET /
+    W->>S: create_session(origin, ttl)
+    S-->>W: session_id, challenge, issued_at, expires_at
+    W-->>B: landing.html (contains session_id + QR URL)
+
+    B->>W: GET /api/v1/session/{sid}/qr.svg
+    W->>S: get(sid)
+    S-->>W: sess.qr_uri
+    W->>Q: render QR from sess.qr_uri
+    W-->>B: qr.svg
+
+    Note over B,M: User scans QR on the phone
+
+    M->>W: (optional) GET /api/v1/session/{sid}/challenge
+    W->>S: get(sid)
+    S-->>W: challenge + metadata
+    W-->>M: challenge payload
+
+    M->>M: Build canonical JSON string
+    Note over M: canonical = {"expires_at":...,"issued_at":...,"nonce":"...","origin":"...","session_id":"..."}
+    M->>M: signature = ML-DSA-87 sign(canonical_bytes)
+    M->>M: pubkey_b64 + fingerprint = SHA3-512(pubkey).hex
+
+    M->>W: POST /api/v1/session/{sid}/complete<br/>{"type":"dna.auth.response","v":1,...}
+    W->>S: get(sid) + validate pending/ttl
+    W->>W: Validate fields + origin/session_id + nonce replay
+    W->>W: Compute fingerprint = SHA3-512(pubkey).hex
+    W->>W: Compare claimed_fp == computed_fp (fail-closed)
+    W->>V: verify_mldsa87_signature(pubkey, canonical_bytes, signature)
+    V-->>W: ok / fail
+
+    alt signature valid
+        W->>S: save_response(... verified=true ...)
+        W->>S: set_status(APPROVED)
+        W-->>M: 200 {"ok": true}
+    else signature invalid
+        W->>S: set_status(DENIED)
+        W-->>M: 403 invalid signature
+    end
+
+    loop Browser polling
+        B->>W: GET /api/v1/session/{sid}
+        W->>S: get(sid)
+        S-->>W: status (pending/approved/denied/expired)
+        W-->>B: status JSON
+    end
+
+    alt approved
+        B->>W: GET /success
+        W-->>B: success.html
+    else denied/expired
+        W-->>B: show failed state
+    end
+
+
 
 1. **Browser opens login page**
    - Server creates a short-lived authentication session
@@ -87,7 +154,6 @@ dna-qr-auth-server/
 ├── docker-compose.yml
 ├── Dockerfile
 └── README.md
-
 
 ---
 
