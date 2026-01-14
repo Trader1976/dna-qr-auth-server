@@ -1,5 +1,8 @@
+# app/storage.py
 import time
 import secrets
+import hashlib
+import base64
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, List
@@ -9,6 +12,19 @@ from urllib.parse import urlencode
 def b64url_token(nbytes: int) -> str:
     # token_urlsafe returns base64url-ish without padding; good enough
     return secrets.token_urlsafe(nbytes)
+
+
+def rp_id_hash_b64(rp_id: str) -> str:
+    """
+    WebAuthn-like rpIdHash:
+      rp_id_hash = base64( SHA-256(rp_id) )
+
+    - Standard Base64 (not urlsafe) to match the phone signing logic.
+    - rp_id must be domain-only and already normalized.
+    """
+    rp_id = (rp_id or "").strip().lower()
+    digest = hashlib.sha256(rp_id.encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("ascii")
 
 
 class SessionStatus(str, Enum):
@@ -33,7 +49,10 @@ class Session:
     scopes: List[str]
 
     # QR payload versioning
-    payload_version: int = 2
+    # v1: origin/session_id/nonce/callback
+    # v2: + rp_id/rp_name/scopes
+    # v3: + rp_id_hash (base64(sha256(rp_id)))
+    payload_version: int = 3
 
     status: SessionStatus = SessionStatus.PENDING
     response: Optional[Dict[str, Any]] = None
@@ -52,11 +71,18 @@ class Session:
           - rp_name
           - scopes
 
+        v3 adds cryptographic RP binding:
+          - rp_id_hash = base64(sha256(rp_id))
+
         NOTE: We URL-encode all values to avoid breaking parsing when
         origin/callback contains reserved characters.
         """
         base = self.origin.rstrip("/")
         callback = f"{base}/api/v1/session/{self.session_id}/complete"
+
+        # Normalize rp_id to domain-only expectations (already enforced in Settings,
+        # but normalize again defensively for QR payload generation).
+        rp_id_norm = (self.rp_id or "").strip().rstrip("/").lower()
 
         params = {
             "v": str(self.payload_version),
@@ -66,10 +92,14 @@ class Session:
             "callback": callback,
 
             # RP binding fields (first-class)
-            "rp_id": self.rp_id,
+            "rp_id": rp_id_norm,
             "rp_name": self.rp_name,
             "scopes": ",".join(self.scopes),
         }
+
+        # v3: include rp_id_hash in the QR payload too (phone signs it)
+        if self.payload_version >= 3:
+            params["rp_id_hash"] = rp_id_hash_b64(rp_id_norm)
 
         return "dna://auth?" + urlencode(params, safe=":/")
 
@@ -78,7 +108,7 @@ class Session:
         if self.is_expired and st == SessionStatus.PENDING:
             st = SessionStatus.EXPIRED
         return {
-            "v": 1,
+            "v": self.payload_version,
             "session_id": self.session_id,
             "origin": self.origin,
             "status": st,
@@ -92,7 +122,14 @@ class InMemoryStore:
         self.sessions: Dict[str, Session] = {}
         self.nonces_seen: Dict[str, set[str]] = {}
 
-    def create_session(self, origin: str, ttl_seconds: int, rp_id: str, rp_name: str, scopes: List[str]) -> Session:
+    def create_session(
+        self,
+        origin: str,
+        ttl_seconds: int,
+        rp_id: str,
+        rp_name: str,
+        scopes: List[str],
+    ) -> Session:
         now = int(time.time())
         session_id = b64url_token(24)
         challenge = b64url_token(32)
