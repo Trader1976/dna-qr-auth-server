@@ -1,11 +1,13 @@
-import time, secrets
+import time
+import secrets
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, List
+from urllib.parse import urlencode
 
 
 def b64url_token(nbytes: int) -> str:
-    # token_urlsafe returns base64url-ish without padding; good enough for v1
+    # token_urlsafe returns base64url-ish without padding; good enough
     return secrets.token_urlsafe(nbytes)
 
 
@@ -24,6 +26,15 @@ class Session:
     issued_at: int
     expires_at: int
     nonce: str
+
+    # RP context (WebAuthn-like)
+    rp_id: str
+    rp_name: str
+    scopes: List[str]
+
+    # QR payload versioning
+    payload_version: int = 2
+
     status: SessionStatus = SessionStatus.PENDING
     response: Optional[Dict[str, Any]] = None
 
@@ -33,16 +44,34 @@ class Session:
 
     @property
     def qr_uri(self) -> str:
+        """
+        Build the QR payload (dna:// URI).
+
+        v2 adds explicit RP context:
+          - rp_id (domain-only)
+          - rp_name
+          - scopes
+
+        NOTE: We URL-encode all values to avoid breaking parsing when
+        origin/callback contains reserved characters.
+        """
         base = self.origin.rstrip("/")
         callback = f"{base}/api/v1/session/{self.session_id}/complete"
-        return (
-            "dna://auth?"
-            "v=1"
-            f"&origin={base}"
-            f"&session_id={self.session_id}"
-            f"&nonce={self.nonce}"
-            f"&callback={callback}"
-        )
+
+        params = {
+            "v": str(self.payload_version),
+            "origin": base,
+            "session_id": self.session_id,
+            "nonce": self.nonce,
+            "callback": callback,
+
+            # RP binding fields (first-class)
+            "rp_id": self.rp_id,
+            "rp_name": self.rp_name,
+            "scopes": ",".join(self.scopes),
+        }
+
+        return "dna://auth?" + urlencode(params, safe=":/")
 
     def public_view(self):
         st = self.status
@@ -63,11 +92,12 @@ class InMemoryStore:
         self.sessions: Dict[str, Session] = {}
         self.nonces_seen: Dict[str, set[str]] = {}
 
-    def create_session(self, origin: str, ttl_seconds: int) -> Session:
+    def create_session(self, origin: str, ttl_seconds: int, rp_id: str, rp_name: str, scopes: List[str]) -> Session:
         now = int(time.time())
         session_id = b64url_token(24)
         challenge = b64url_token(32)
         nonce = b64url_token(16)
+
         sess = Session(
             session_id=session_id,
             challenge=challenge,
@@ -75,6 +105,9 @@ class InMemoryStore:
             issued_at=now,
             expires_at=now + ttl_seconds,
             nonce=nonce,
+            rp_id=rp_id,
+            rp_name=rp_name,
+            scopes=scopes,
         )
         self.sessions[session_id] = sess
         self.nonces_seen[session_id] = set()

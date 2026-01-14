@@ -76,7 +76,13 @@ def landing(request: Request):
     sess = store.create_session(
         origin=settings.ORIGIN,
         ttl_seconds=settings.SESSION_TTL_SECONDS,
+        rp_id=settings.RP_ID,
+        rp_name=settings.RP_NAME,
+        scopes=settings.SCOPES,
     )
+
+    # DEBUG: show exactly what the QR encodes
+#    print("QR_URI:", sess.qr_uri)
 
     return templates.TemplateResponse(
         "landing.html",
@@ -127,7 +133,7 @@ def get_challenge(session_id: str):
         raise HTTPException(410, "session expired")
 
     return {
-        "v": 1,
+        "v": 2,
         "session_id": sess.session_id,
         "challenge": sess.challenge,
         "rp_id": settings.RP_ID,
@@ -148,8 +154,9 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
 
     This endpoint:
       - Validates session state
-      - Reconstructs the canonical message
+      - Reconstructs the canonical message (v1 or v2)
       - Verifies fingerprint ↔ public key binding
+      - (v2) Verifies RP binding via rp_id
       - Verifies ML-DSA-87 signature using native PQClean code
       - Approves or denies the session
     """
@@ -173,7 +180,12 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     if body.get("type") != "dna.auth.response":
         raise HTTPException(400, "invalid type")
 
-    if int(body.get("v", 0)) != 1:
+    try:
+        payload_v = int(body.get("v", 0))
+    except Exception:
+        raise HTTPException(400, "invalid version")
+
+    if payload_v not in (1, 2):
         raise HTTPException(400, "invalid version")
 
     # Client must explicitly send public key now
@@ -188,7 +200,12 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     if not isinstance(signed_payload, dict):
         raise HTTPException(400, "signed_payload must be object")
 
-    for k in ("origin", "session_id", "nonce", "issued_at", "expires_at"):
+    # signed_payload required fields differ by version
+    required = ["origin", "session_id", "nonce", "issued_at", "expires_at"]
+    if payload_v >= 2:
+        required.append("rp_id")
+
+    for k in required:
         if k not in signed_payload:
             raise HTTPException(400, f"missing signed_payload field: {k}")
 
@@ -238,15 +255,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
         raise HTTPException(409, "replay nonce")
 
     # -------------------------------------------------------------------------
-    # Canonical message reconstruction
-    # -------------------------------------------------------------------------
-    canonical = (
-        f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
-        f'"origin":"{origin}","session_id":"{session_id}"}}'
-    )
-    canonical_bytes = canonical.encode("utf-8")
-
-    # -------------------------------------------------------------------------
     # Decode signature and public key
     # -------------------------------------------------------------------------
     try:
@@ -261,19 +269,54 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     claimed_fp = str(body["fingerprint"]).lower().strip()
     computed_fp = _fingerprint_from_pubkey(pubkey)
 
+    # -------------------------------------------------------------------------
+    # RP binding (v2) - WebAuthn-like: rp_id must match session rp_id
+    # -------------------------------------------------------------------------
+    rp_id = None
+    if payload_v >= 2:
+        rp_id = str(signed_payload["rp_id"]).lower().strip()
+        expected_rp = str(sess.rp_id).lower().strip()
+        if rp_id != expected_rp:
+            append_event(
+                {
+                    **build_common(
+                        session_id=session_id,
+                        claimed_fp=claimed_fp,
+                        pubkey_fp=computed_fp,
+                        origin=origin,
+                        nonce=nonce,
+                        request_ip=client_ip,
+                        user_agent=user_agent,
+                    ),
+                    "result": "denied",
+                    "reason": "rp_id_mismatch",
+                    "rp_id": rp_id,
+                    "expected_rp_id": expected_rp,
+                }
+            )
+            store.set_status(sess.session_id, SessionStatus.DENIED)
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "not_authorized",
+                    "reason": "rp_id_mismatch",
+                    "message": "RP binding failed (rp_id mismatch).",
+                },
+            )
+
     if claimed_fp != computed_fp:
+        # Canonical bytes are computed below; for this error we can still log hashes/lengths
         append_event(
             {
                 **build_common(
                     session_id=session_id,
                     claimed_fp=claimed_fp,
                     pubkey_fp=computed_fp,
-                    canonical_bytes=canonical_bytes,
-                    signature_bytes=signature,
                     origin=origin,
                     nonce=nonce,
                     request_ip=client_ip,
                     user_agent=user_agent,
+                    signature_bytes=signature,
                 ),
                 "result": "denied",
                 "reason": "fingerprint_pubkey_mismatch",
@@ -281,7 +324,14 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
         )
         store.set_status(sess.session_id, SessionStatus.DENIED)
         raise HTTPException(403, "fingerprint/pubkey mismatch")
-
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_authorized",
+                "reason": "fingerprint_pubkey_mismatch",
+                "message": "Identity mismatch (fingerprint does not match public key).",
+            },
+        )
     # -------------------------------------------------------------------------
     # Optional allowlist (known identities)
     # -------------------------------------------------------------------------
@@ -292,12 +342,11 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
                     session_id=session_id,
                     claimed_fp=claimed_fp,
                     pubkey_fp=computed_fp,
-                    canonical_bytes=canonical_bytes,
-                    signature_bytes=signature,
                     origin=origin,
                     nonce=nonce,
                     request_ip=client_ip,
                     user_agent=user_agent,
+                    signature_bytes=signature,
                 ),
                 "result": "denied",
                 "reason": "identity_not_allowed",
@@ -312,6 +361,23 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
                 "message": "This DNA identity is not authorized for this service.",
             },
         )
+
+    # -------------------------------------------------------------------------
+    # Canonical message reconstruction (MUST match phone byte-for-byte)
+    # -------------------------------------------------------------------------
+    if payload_v == 1:
+        canonical = (
+            f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
+            f'"origin":"{origin}","session_id":"{session_id}"}}'
+        )
+    else:
+        # v2: include rp_id between origin and session_id (alphabetical key order)
+        canonical = (
+            f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
+            f'"origin":"{origin}","rp_id":"{rp_id}","session_id":"{session_id}"}}'
+        )
+
+    canonical_bytes = canonical.encode("utf-8")
 
     # -------------------------------------------------------------------------
     # Cryptographic verification (native PQClean)
@@ -360,14 +426,21 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
         )
         store.set_status(sess.session_id, SessionStatus.DENIED)
         raise HTTPException(403, "invalid signature")
-
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_authorized",
+                "reason": "invalid_signature",
+                "message": "Signature verification failed.",
+            },
+        )
     # -------------------------------------------------------------------------
     # Success → approve session
     # -------------------------------------------------------------------------
     store.save_response(
         sess.session_id,
         {
-            "v": 1,
+            "v": payload_v,
             "type": body["type"],
             "session_id": session_id,
             "fingerprint": claimed_fp,
@@ -395,6 +468,8 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             "result": "approved",
             "reason": "signature_valid",
             "alg": "ML-DSA-87",
+            "v": payload_v,
+            **({"rp_id": rp_id} if rp_id else {}),
         }
     )
 
