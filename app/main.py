@@ -37,6 +37,9 @@ app.mount(
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+MIN_PROTOCOL_V = 3
+
+
 def _b64decode_loose(s: str) -> bytes:
     """
     Decode Base64 with optional missing padding.
@@ -143,7 +146,7 @@ def get_challenge(session_id: str):
         raise HTTPException(410, "session expired")
 
     return {
-        "v": 3,  # protocol capability (server-side)
+        "v": MIN_PROTOCOL_V,  # protocol capability (server-side)
         "session_id": sess.session_id,
         "challenge": sess.challenge,
         "rp_id": settings.RP_ID,
@@ -162,12 +165,14 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     """
     Completes a QR authentication session.
 
+    Enforces minimum protocol v3.
+
     This endpoint:
       - Validates session state
-      - Reconstructs the canonical message (v1/v2/v3)
+      - Reconstructs the canonical message (v3 only)
       - Verifies fingerprint ↔ public key binding
-      - (v2+) Verifies RP binding via rp_id
-      - (v3+) Verifies rp_id_hash = base64(SHA-256(rp_id))
+      - Verifies RP binding via rp_id
+      - Verifies rp_id_hash = base64(SHA-256(rp_id))
       - Verifies ML-DSA-87 signature using native PQClean code
       - Approves or denies the session
     """
@@ -196,7 +201,17 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     except Exception:
         raise HTTPException(400, "invalid version")
 
-    if payload_v not in (1, 2, 3):
+    if payload_v < MIN_PROTOCOL_V:
+        raise HTTPException(
+            status_code=426,
+            detail={
+                "error": "upgrade_required",
+                "min_v": MIN_PROTOCOL_V,
+                "message": f"Client protocol too old. Minimum supported v is {MIN_PROTOCOL_V}.",
+            },
+        )
+
+    if payload_v != MIN_PROTOCOL_V:
         raise HTTPException(400, "invalid version")
 
     # Client must explicitly send public key now
@@ -224,16 +239,10 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             flush=True,
         )
     except Exception:
-        # Never break auth due to debug printing
         pass
 
-    # signed_payload required fields differ by version
-    required = ["origin", "session_id", "nonce", "issued_at", "expires_at"]
-    if payload_v >= 2:
-        required.append("rp_id")
-    if payload_v >= 3:
-        required.append("rp_id_hash")
-
+    # v3 required signed_payload fields
+    required = ["origin", "session_id", "nonce", "issued_at", "expires_at", "rp_id", "rp_id_hash"]
     for k in required:
         if k not in signed_payload:
             raise HTTPException(400, f"missing signed_payload field: {k}")
@@ -257,7 +266,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     if exp <= iat:
         raise HTTPException(400, "expires_at must be > issued_at")
 
-    # Prevent long-lived signatures
     if exp - iat > 600:
         raise HTTPException(400, "expires window too large")
 
@@ -300,84 +308,77 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     computed_fp = _fingerprint_from_pubkey(pubkey)
 
     # -------------------------------------------------------------------------
-    # RP binding (v2+) - rp_id must match session rp_id
+    # RP binding (v3) - rp_id must match session rp_id
     # -------------------------------------------------------------------------
-    rp_id: str | None = None
-    rp_id_hash: str | None = None
+    rp_id = str(signed_payload["rp_id"]).lower().strip()
+    expected_rp = str(sess.rp_id).lower().strip()
 
-    if payload_v >= 2:
-        rp_id = str(signed_payload["rp_id"]).lower().strip()
-        expected_rp = str(sess.rp_id).lower().strip()
-
-        if rp_id != expected_rp:
-            append_event(
-                {
-                    **build_common(
-                        session_id=session_id,
-                        claimed_fp=claimed_fp,
-                        pubkey_fp=computed_fp,
-                        origin=origin,
-                        nonce=nonce,
-                        request_ip=client_ip,
-                        user_agent=user_agent,
-                        signature_bytes=signature,
-                    ),
-                    "result": "denied",
-                    "reason": "rp_id_mismatch",
-                    "rp_id": rp_id,
-                    "expected_rp_id": expected_rp,
-                    "v": payload_v,
-                }
-            )
-            store.set_status(sess.session_id, SessionStatus.DENIED)
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "not_authorized",
-                    "reason": "rp_id_mismatch",
-                    "message": "RP binding failed (rp_id mismatch).",
-                },
-            )
+    if rp_id != expected_rp:
+        append_event(
+            {
+                **build_common(
+                    session_id=session_id,
+                    claimed_fp=claimed_fp,
+                    pubkey_fp=computed_fp,
+                    origin=origin,
+                    nonce=nonce,
+                    request_ip=client_ip,
+                    user_agent=user_agent,
+                    signature_bytes=signature,
+                ),
+                "result": "denied",
+                "reason": "rp_id_mismatch",
+                "rp_id": rp_id,
+                "expected_rp_id": expected_rp,
+                "v": payload_v,
+            }
+        )
+        store.set_status(sess.session_id, SessionStatus.DENIED)
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_authorized",
+                "reason": "rp_id_mismatch",
+                "message": "RP binding failed (rp_id mismatch).",
+            },
+        )
 
     # -------------------------------------------------------------------------
-    # RP hash binding (v3+) - rp_id_hash must match base64(SHA-256(rp_id))
+    # RP hash binding (v3) - rp_id_hash must match base64(SHA-256(rp_id))
     # -------------------------------------------------------------------------
-    if payload_v >= 3:
-        # rp_id is guaranteed present for v3 by required[] above
-        assert rp_id is not None
-        rp_id_hash = str(signed_payload["rp_id_hash"]).strip()
-        expected_hash = _sha256_b64(rp_id)
+    rp_id_hash = str(signed_payload["rp_id_hash"]).strip()
+    expected_hash = _sha256_b64(rp_id)
 
-        if rp_id_hash != expected_hash:
-            append_event(
-                {
-                    **build_common(
-                        session_id=session_id,
-                        claimed_fp=claimed_fp,
-                        pubkey_fp=computed_fp,
-                        origin=origin,
-                        nonce=nonce,
-                        request_ip=client_ip,
-                        user_agent=user_agent,
-                        signature_bytes=signature,
-                    ),
-                    "result": "denied",
-                    "reason": "rp_id_hash_mismatch",
-                    "rp_id": rp_id,
-                    "rp_id_hash": rp_id_hash,
-                    "expected_rp_id_hash": expected_hash,
-                    "v": payload_v,
-                }
-            )
-            store.set_status(sess.session_id, SessionStatus.DENIED)
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "not_authorized",
-                    "reason": "rp_id_hash_mismatch",
-                    "message": "RP cryptographic binding failed (rp_id_hash mismatch).",
-                },
-            )
+    if rp_id_hash != expected_hash:
+        append_event(
+            {
+                **build_common(
+                    session_id=session_id,
+                    claimed_fp=claimed_fp,
+                    pubkey_fp=computed_fp,
+                    origin=origin,
+                    nonce=nonce,
+                    request_ip=client_ip,
+                    user_agent=user_agent,
+                    signature_bytes=signature,
+                ),
+                "result": "denied",
+                "reason": "rp_id_hash_mismatch",
+                "rp_id": rp_id,
+                "rp_id_hash": rp_id_hash,
+                "expected_rp_id_hash": expected_hash,
+                "v": payload_v,
+            }
+        )
+        store.set_status(sess.session_id, SessionStatus.DENIED)
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "not_authorized",
+                "reason": "rp_id_hash_mismatch",
+                "message": "RP cryptographic binding failed (rp_id_hash mismatch).",
+            },
+        )
 
     # -------------------------------------------------------------------------
     # Optional allowlist (known identities)
@@ -398,7 +399,8 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
                 "result": "denied",
                 "reason": "identity_not_allowed",
                 "v": payload_v,
-                **({"rp_id": rp_id} if rp_id else {}),
+                "rp_id": rp_id,
+                "rp_id_hash": rp_id_hash,
             }
         )
         store.set_status(sess.session_id, SessionStatus.DENIED)
@@ -412,25 +414,13 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
         )
 
     # -------------------------------------------------------------------------
-    # Canonical message reconstruction (MUST match phone byte-for-byte)
+    # Canonical message reconstruction (v3 only; MUST match phone byte-for-byte)
     # -------------------------------------------------------------------------
-    if payload_v == 1:
-        canonical = (
-            f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
-            f'"origin":"{origin}","session_id":"{session_id}"}}'
-        )
-    elif payload_v == 2:
-        canonical = (
-            f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
-            f'"origin":"{origin}","rp_id":"{rp_id}","session_id":"{session_id}"}}'
-        )
-    else:
-        canonical = (
-            f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
-            f'"origin":"{origin}","rp_id":"{rp_id}","rp_id_hash":"{rp_id_hash}",'
-            f'"session_id":"{session_id}"}}'
-        )
-
+    canonical = (
+        f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
+        f'"origin":"{origin}","rp_id":"{rp_id}","rp_id_hash":"{rp_id_hash}",'
+        f'"session_id":"{session_id}"}}'
+    )
     canonical_bytes = canonical.encode("utf-8")
 
     # -------------------------------------------------------------------------
@@ -453,8 +443,8 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
                 "result": "denied",
                 "reason": "fingerprint_pubkey_mismatch",
                 "v": payload_v,
-                **({"rp_id": rp_id} if rp_id else {}),
-                **({"rp_id_hash": rp_id_hash} if rp_id_hash else {}),
+                "rp_id": rp_id,
+                "rp_id_hash": rp_id_hash,
             }
         )
         store.set_status(sess.session_id, SessionStatus.DENIED)
@@ -490,8 +480,8 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
                 "reason": "verifier_exception",
                 "detail": str(e)[:200],
                 "v": payload_v,
-                **({"rp_id": rp_id} if rp_id else {}),
-                **({"rp_id_hash": rp_id_hash} if rp_id_hash else {}),
+                "rp_id": rp_id,
+                "rp_id_hash": rp_id_hash,
             }
         )
         store.set_status(sess.session_id, SessionStatus.DENIED)
@@ -514,8 +504,8 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
                 "result": "denied",
                 "reason": "invalid_signature",
                 "v": payload_v,
-                **({"rp_id": rp_id} if rp_id else {}),
-                **({"rp_id_hash": rp_id_hash} if rp_id_hash else {}),
+                "rp_id": rp_id,
+                "rp_id_hash": rp_id_hash,
             }
         )
         store.set_status(sess.session_id, SessionStatus.DENIED)
@@ -563,8 +553,8 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             "reason": "signature_valid",
             "alg": "ML-DSA-87",
             "v": payload_v,
-            **({"rp_id": rp_id} if rp_id else {}),
-            **({"rp_id_hash": rp_id_hash} if rp_id_hash else {}),
+            "rp_id": rp_id,
+            "rp_id_hash": rp_id_hash,
         }
     )
 

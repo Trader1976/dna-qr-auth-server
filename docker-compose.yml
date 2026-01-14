@@ -14,9 +14,15 @@ services:
       - CALLBACK_URL=https://YOURDOMAIN/api/callback
 
       # -------------------------------------------------
-      # Audit logging (NEW)
+      # Audit logging
       # -------------------------------------------------
       - AUDIT_LOG_PATH=/data/audit/signature_audit.jsonl
+
+      # -------------------------------------------------
+      # Audit logging timestamps / timezone
+      # -------------------------------------------------
+      - TZ=Europe/Helsinki
+
 
     volumes:
       - ./audit:/data/audit

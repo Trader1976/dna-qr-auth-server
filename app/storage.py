@@ -9,6 +9,10 @@ from typing import Dict, Optional, Any, List
 from urllib.parse import urlencode
 
 
+# Keep in sync with app/main.py (MIN_PROTOCOL_V)
+MIN_PROTOCOL_V = 3
+
+
 def b64url_token(nbytes: int) -> str:
     # token_urlsafe returns base64url-ish without padding; good enough
     return secrets.token_urlsafe(nbytes)
@@ -20,7 +24,7 @@ def rp_id_hash_b64(rp_id: str) -> str:
       rp_id_hash = base64( SHA-256(rp_id) )
 
     - Standard Base64 (not urlsafe) to match the phone signing logic.
-    - rp_id must be domain-only and already normalized.
+    - rp_id must be domain-only and normalized.
     """
     rp_id = (rp_id or "").strip().lower()
     digest = hashlib.sha256(rp_id.encode("utf-8")).digest()
@@ -49,10 +53,8 @@ class Session:
     scopes: List[str]
 
     # QR payload versioning
-    # v1: origin/session_id/nonce/callback
-    # v2: + rp_id/rp_name/scopes
-    # v3: + rp_id_hash (base64(sha256(rp_id)))
-    payload_version: int = 3
+    # Server enforces minimum v3 (see app/main.py).
+    payload_version: int = MIN_PROTOCOL_V
 
     status: SessionStatus = SessionStatus.PENDING
     response: Optional[Dict[str, Any]] = None
@@ -66,12 +68,10 @@ class Session:
         """
         Build the QR payload (dna:// URI).
 
-        v2 adds explicit RP context:
-          - rp_id (domain-only)
+        v3 payload includes:
+          - rp_id (domain-only, normalized)
           - rp_name
           - scopes
-
-        v3 adds cryptographic RP binding:
           - rp_id_hash = base64(sha256(rp_id))
 
         NOTE: We URL-encode all values to avoid breaking parsing when
@@ -80,8 +80,7 @@ class Session:
         base = self.origin.rstrip("/")
         callback = f"{base}/api/v1/session/{self.session_id}/complete"
 
-        # Normalize rp_id to domain-only expectations (already enforced in Settings,
-        # but normalize again defensively for QR payload generation).
+        # Defensive normalization (Settings should already enforce domain-only).
         rp_id_norm = (self.rp_id or "").strip().rstrip("/").lower()
 
         params = {
@@ -90,16 +89,11 @@ class Session:
             "session_id": self.session_id,
             "nonce": self.nonce,
             "callback": callback,
-
-            # RP binding fields (first-class)
             "rp_id": rp_id_norm,
             "rp_name": self.rp_name,
             "scopes": ",".join(self.scopes),
+            "rp_id_hash": rp_id_hash_b64(rp_id_norm),
         }
-
-        # v3: include rp_id_hash in the QR payload too (phone signs it)
-        if self.payload_version >= 3:
-            params["rp_id_hash"] = rp_id_hash_b64(rp_id_norm)
 
         return "dna://auth?" + urlencode(params, safe=":/")
 
