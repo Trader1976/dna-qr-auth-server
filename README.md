@@ -48,7 +48,7 @@ flowchart TD
   J -->|Yes| K["Session approved"]
   J -->|No| L["Session denied"]
   K --> M["Browser polling sees approved → redirect /success"]
-
+```
 
 Protocol Versions
 Version	Features	Status
