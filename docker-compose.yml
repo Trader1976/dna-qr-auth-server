@@ -2,7 +2,7 @@ services:
   app:
     build: .
     environment:
-      - ORIGIN=https://suggesting-retrieved-serving-gentleman.trycloudflare.com
+      - ORIGIN=https://undertaken-pos-precious-receptor.trycloudflare.com
       - SESSION_TTL_SECONDS=120
       # optional / if you keep it:
       - CALLBACK_URL=https://YOURDOMAIN/api/callback
@@ -15,6 +15,7 @@ services:
     volumes:
       # Persist audit logs outside the container
       - ./audit:/data/audit
+      - ./audit:/app/audit
 
     expose:
       - "9000"
