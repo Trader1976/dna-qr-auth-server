@@ -1,3 +1,7 @@
+
+<img width="492" height="539" alt="qr_auth" src="https://github.com/user-attachments/assets/1799f306-61e7-4de8-99ee-71e2965f6496" />
+
+
 # DNA QR Authentication Server
 
 **Last Updated:** 2026-01-15  
