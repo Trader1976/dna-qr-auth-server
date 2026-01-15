@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DNA QR Auth (v4)</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="card">
+    <h1>Sign in with DNA</h1>
+
+    <p><b>Mode:</b> {{ auth_mode }}</p>
+    <p><b>Session (sid):</b> <code id="sid">issuing…</code></p>
+
+    <div class="qr">
+      <img id="qrimg" alt="QR code" />
+    </div>
+
+    <p class="hint">Open DNA-Messenger → QR Reader → scan this code.</p>
+
+    <div id="status" class="status">Issuing session…</div>
+  </div>
+
+  <script>
+    async function run() {
+      const statusEl = document.getElementById("status");
+      const sidEl = document.getElementById("sid");
+      const qrImg = document.getElementById("qrimg");
+
+      const r = await fetch("/api/v4/session", { method: "POST" });
+      if (!r.ok) {
+        statusEl.textContent = "Error issuing session: HTTP " + r.status;
+        return;
+      }
+      const j = await r.json();
+
+      const sid = (j.sid || "").trim();
+      sidEl.textContent = sid || "(no sid)";
+
+      // ✅ app.js will read this and poll /api/v4/status
+      window.V4_SID = sid;
+
+      statusEl.textContent = "Waiting for approval… (scan QR)";
+      qrImg.src = "/api/v4/qr.svg?st=" + encodeURIComponent(j.st);
+    }
+
+    run().catch(e => {
+      document.getElementById("status").textContent = "Error: " + e;
+    });
+  </script>
+
+  <!-- ✅ actually start polling -->
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -167,6 +167,43 @@ Logs without both prev_hash and hash are not fully chained.
 The .state file is meaningful only for chained logs.
 
 
+🔐 Server Signing Key (Required for v4 / Stateless Mode)
+
+DNA-QR-Auth uses a server-side Ed25519 signing key to issue and verify stateless session (st) and approval (at) tokens.
+
+This key:
+
+is generated once by the server operator
+never leaves the server
+is not a user identity
+enables stateless / CDN-scale verification
+
+1️⃣ Generate the server key (once)
+
+Run this on the machine where you deploy the server:
+
+python3 - <<'PY'
+import base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+
+sk = Ed25519PrivateKey.generate()
+
+raw = sk.private_bytes(
+    encoding=serialization.Encoding.Raw,
+    format=serialization.PrivateFormat.Raw,
+    encryption_algorithm=serialization.NoEncryption(),
+)
+
+print(base64.b64encode(raw).decode("ascii"))
+PY
+Example output:
++Y8K16fqD+UQpt51ZUOvfMlihjkA151Arb6riD7IxlW=
+
+Save this key into .env file so docker-compose.yml loads it
+SERVER_ED25519_SK_B64=+Y8K16fqD+UQpt51ZUOvfMlihjkA151Arb6riD7IxlW=
+
+
 Security Considerations
 
 Downgrade prevention via version-specific requirements
@@ -180,3 +217,5 @@ Version	Date	Changes
 v3	2026-01-14	Added rp_id_hash, audit verification tooling
 v2	2026-01-13	Added RP binding
 v1	2026-01-12	Initial implementation
+
+

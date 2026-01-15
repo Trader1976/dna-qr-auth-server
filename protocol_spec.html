@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DNA QR Authentication Protocol (v3 & v4)</title>
+  <meta name="description" content="Clean protocol specification for DNA QR Authentication: v3 (stateful) and v4 (stateless/CDN-scale)." />
+  <style>
+    :root{
+      --bg: #0b0f14;
+      --panel: #0f1621;
+      --panel2: #0c121b;
+      --text: #e6edf3;
+      --muted: #9aa7b2;
+      --border: rgba(255,255,255,.08);
+      --brand: #ff7a18; /* CPUNK orange */
+      --brand2: #ffb454;
+      --ok: #2bd576;
+      --warn: #ffcc66;
+      --bad: #ff5c73;
+      --codebg: rgba(0,0,0,.35);
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
+      --radius: 18px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      --maxw: 1100px;
+    }
+
+    *{ box-sizing:border-box; }
+    html,body{ height:100%; }
+    body{
+      margin:0;
+      font-family: var(--sans);
+      background:
+        radial-gradient(1200px 500px at 15% 0%, rgba(255,122,24,.12), transparent 60%),
+        radial-gradient(900px 500px at 85% 10%, rgba(255,180,84,.08), transparent 55%),
+        radial-gradient(800px 600px at 50% 100%, rgba(43,213,118,.06), transparent 60%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    a{ color: var(--brand2); text-decoration:none; }
+    a:hover{ text-decoration:underline; }
+
+    .wrap{ max-width: var(--maxw); margin: 0 auto; padding: 28px 18px 72px; }
+
+    .topbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:16px;
+      margin-bottom: 22px;
+    }
+
+    .brand{
+      display:flex;
+      align-items:center;
+      gap:12px;
+    }
+    .logo{
+      width: 42px; height: 42px;
+      border-radius: 14px;
+      background:
+        radial-gradient(18px 18px at 30% 30%, rgba(255,255,255,.18), transparent 60%),
+        linear-gradient(135deg, rgba(255,122,24,.9), rgba(255,180,84,.65));
+      box-shadow: 0 10px 22px rgba(255,122,24,.18);
+      border: 1px solid rgba(255,255,255,.12);
+    }
+    .brand h1{
+      font-size: 16px;
+      margin: 0;
+      letter-spacing:.2px;
+    }
+    .brand small{
+      display:block;
+      color: var(--muted);
+      margin-top: 2px;
+      font-size: 12px;
+    }
+
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255,122,24,.10);
+      border: 1px solid rgba(255,122,24,.25);
+      color: var(--brand2);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .pill .dot{
+      width:8px; height:8px;
+      border-radius: 999px;
+      background: var(--brand);
+      box-shadow: 0 0 18px rgba(255,122,24,.35);
+    }
+
+    .hero{
+      background: linear-gradient(180deg, rgba(255,122,24,.08), rgba(15,22,33,.92));
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px 20px;
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    .hero:before{
+      content:"";
+      position:absolute;
+      inset:-1px;
+      background:
+        radial-gradient(600px 220px at 15% 0%, rgba(255,122,24,.18), transparent 60%),
+        radial-gradient(520px 220px at 85% 10%, rgba(255,180,84,.14), transparent 60%);
+      pointer-events:none;
+      opacity:.9;
+    }
+    .hero > *{ position:relative; }
+    .hero h2{
+      margin: 0 0 8px;
+      font-size: 22px;
+      letter-spacing:.2px;
+    }
+    .hero p{ margin: 0; color: var(--muted); max-width: 75ch; }
+
+    .grid{
+      display:grid;
+      grid-template-columns: 280px 1fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    @media (max-width: 920px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+
+    .card{
+      background: rgba(15,22,33,.78);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .toc{
+      padding: 16px 14px;
+      position: sticky;
+      top: 16px;
+      align-self: start;
+    }
+    .toc h3{
+      margin: 0 0 10px;
+      font-size: 13px;
+      color: var(--muted);
+      letter-spacing:.3px;
+      text-transform: uppercase;
+    }
+    .toc a{
+      display:block;
+      padding: 7px 10px;
+      border-radius: 12px;
+      color: var(--text);
+      font-size: 14px;
+    }
+    .toc a:hover{
+      background: rgba(255,255,255,.04);
+      text-decoration:none;
+    }
+    .toc a .tag{
+      color: var(--muted);
+      font-size: 12px;
+      margin-left: 6px;
+    }
+
+    .content{ padding: 18px 18px 28px; }
+    .content h2{
+      margin: 20px 0 8px;
+      font-size: 18px;
+      letter-spacing: .2px;
+    }
+    .content h3{
+      margin: 18px 0 6px;
+      font-size: 15px;
+      color: var(--brand2);
+      letter-spacing: .2px;
+    }
+    .content p{ margin: 8px 0; color: var(--text); }
+    .content p.muted{ color: var(--muted); }
+
+    .callout{
+      border: 1px solid rgba(255,122,24,.25);
+      background: rgba(255,122,24,.08);
+      border-radius: 16px;
+      padding: 12px 12px;
+      margin: 12px 0;
+      color: var(--brand2);
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+    }
+    .callout .icon{
+      width: 22px; height: 22px;
+      border-radius: 8px;
+      background: rgba(255,122,24,.22);
+      border: 1px solid rgba(255,122,24,.32);
+      display:grid; place-items:center;
+      flex: 0 0 auto;
+      margin-top: 2px;
+    }
+    .callout strong{ color: var(--text); }
+
+    code, pre{
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+    pre{
+      background: var(--codebg);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 16px;
+      padding: 12px 12px;
+      overflow:auto;
+      margin: 10px 0 14px;
+    }
+    .inline{
+      background: rgba(0,0,0,.25);
+      border: 1px solid rgba(255,255,255,.10);
+      padding: 2px 6px;
+      border-radius: 9px;
+      color: #eaf2ff;
+    }
+
+    table{
+      width:100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow:hidden;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 16px;
+      margin: 10px 0 14px;
+      background: rgba(0,0,0,.18);
+    }
+    th, td{
+      text-align:left;
+      padding: 10px 10px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+      vertical-align: top;
+      font-size: 14px;
+    }
+    th{
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: .25px;
+      text-transform: uppercase;
+      background: rgba(255,255,255,.03);
+    }
+    tr:last-child td{ border-bottom:none; }
+
+    .badge{
+      display:inline-flex;
+      align-items:center;
+      gap:7px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,.10);
+      background: rgba(255,255,255,.04);
+      font-size: 12px;
+      color: var(--muted);
+      margin-right: 8px;
+    }
+    .badge b{ color: var(--text); font-weight: 600; }
+    .b-ok{ border-color: rgba(43,213,118,.25); background: rgba(43,213,118,.08); color: rgba(43,213,118,.95); }
+    .b-warn{ border-color: rgba(255,204,102,.25); background: rgba(255,204,102,.08); color: rgba(255,204,102,.95); }
+    .b-brand{ border-color: rgba(255,122,24,.30); background: rgba(255,122,24,.10); color: var(--brand2); }
+
+    .hr{
+      height:1px;
+      background: rgba(255,255,255,.08);
+      margin: 18px 0;
+    }
+
+    .footer{
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      justify-content:space-between;
+      align-items:center;
+      padding-top: 10px;
+    }
+
+    .copybtn{
+      appearance:none;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.05);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 12px;
+      cursor:pointer;
+      font-size: 12px;
+    }
+    .copybtn:hover{ background: rgba(255,255,255,.08); }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div>
+          <h1>DNA QR Authentication Protocol</h1>
+          <small>Clean spec for v3 (stateful) and v4 (stateless/CDN-scale)</small>
+        </div>
+      </div>
+      <div class="pill" title="Specification status">
+        <span class="dot" aria-hidden="true"></span>
+        <span>v3 & v4 — Stable</span>
+      </div>
+    </div>
+
+    <section class="hero" id="top">
+      <h2>Device-mediated, passwordless authentication using DNA identity</h2>
+      <p>
+        This document specifies the DNA QR Authentication protocol used by a verifier (server) and DNA-Messenger (authenticator).
+        It supports <span class="inline">v3</span> (stateful session storage) and <span class="inline">v4</span> (stateless verification).
+      </p>
+      <div style="margin-top:12px">
+        <span class="badge b-brand"><b>Crypto</b> ML-DSA-87 (PQ signatures)</span>
+        <span class="badge b-ok"><b>v4</b> No DB required</span>
+        <span class="badge b-warn"><b>QR</b> No secrets inside</span>
+      </div>
+    </section>
+
+    <div class="grid">
+      <aside class="card toc">
+        <h3>Contents</h3>
+        <a href="#overview">1. Overview</a>
+        <a href="#actors">2. Actors</a>
+        <a href="#identity">3. Identity Model</a>
+        <a href="#qr">4. QR Payloads</a>
+        <a href="#v3">5. Protocol v3 — Stateful</a>
+        <a href="#v4">6. Protocol v4 — Stateless</a>
+        <a href="#at">7. Approval Token (at)</a>
+        <a href="#security">8. Security Properties</a>
+        <a href="#config">9. Configuration</a>
+        <a href="#goals">10. Design Goals</a>
+        <a href="#summary">11. Summary</a>
+        <div class="hr"></div>
+        <button class="copybtn" id="copyLink">Copy link to this page</button>
+      </aside>
+
+      <main class="card content" role="main">
+        <section id="overview">
+          <h2>1. Overview</h2>
+          <p>
+            DNA QR Authentication is a <b>passwordless, device-mediated</b> protocol where DNA-Messenger approves an authentication request
+            initiated by a website or application.
+          </p>
+
+          <h3>Key properties</h3>
+          <ul>
+            <li>No passwords</li>
+            <li>No shared secrets</li>
+            <li>No cookies required</li>
+            <li>User approval happens on a separate trusted device</li>
+            <li>Identity bound to a fingerprint derived from the public key</li>
+            <li>Supports <b>post-quantum signatures</b> (ML-DSA-87)</li>
+            <li>Supports <b>stateless / CDN-scale</b> verification (v4)</li>
+          </ul>
+
+          <h3>Modes</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Mode</th>
+                <th>Name</th>
+                <th>Server State</th>
+                <th>Use case</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="inline">v3</span></td>
+                <td>Stateful</td>
+                <td>Required</td>
+                <td>Simple deployments, legacy compatibility</td>
+              </tr>
+              <tr>
+                <td><span class="inline">v4</span></td>
+                <td>Stateless</td>
+                <td>Not required</td>
+                <td>CDN-scale, zero-storage verification</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="actors">
+          <h2>2. Actors</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Actor</th>
+                <th>Description</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><b>Client (Browser / App)</b></td>
+                <td>Displays QR code and waits for approval</td>
+              </tr>
+              <tr>
+                <td><b>Authenticator (DNA-Messenger)</b></td>
+                <td>Holds DNA identity and signs approval</td>
+              </tr>
+              <tr>
+                <td><b>Verifier (Server)</b></td>
+                <td>Verifies signatures and grants access</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="identity">
+          <h2>3. Identity Model</h2>
+          <p>
+            Each DNA identity includes a signing keypair and a stable <b>fingerprint</b> derived from the public key:
+          </p>
+          <pre><code>fingerprint = hex(SHA3-512(public_key))</code></pre>
+          <p class="muted">
+            The verifier never stores private keys. The fingerprint is the stable user identifier.
+          </p>
+        </section>
+
+        <section id="qr">
+          <h2>4. QR Payloads</h2>
+          <p>QR codes always encode a <span class="inline">dna://</span> URI.</p>
+          <div class="callout">
+            <div class="icon" aria-hidden="true">!</div>
+            <div>
+              <strong>Important:</strong> QR payloads never include secrets. They encode descriptors, tokens, and display hints.
+            </div>
+          </div>
+
+          <h3>4.1 Common properties</h3>
+          <ul>
+            <li>Transport is URI text (QR is just a carrier)</li>
+            <li>All validation is done by signatures and bindings, not by QR secrecy</li>
+          </ul>
+        </section>
+
+        <section id="v3">
+          <h2>5. Protocol v3 — Stateful Mode</h2>
+          <h3>5.1 Characteristics</h3>
+          <ul>
+            <li>Server stores session state</li>
+            <li>Browser polls server for approval</li>
+            <li>Simple deployment model</li>
+            <li>Requires server memory/database</li>
+          </ul>
+
+          <h3>5.2 QR payload (v3)</h3>
+          <pre><code>dna://auth
+  ?v=3
+  &amp;origin=https://example.com
+  &amp;session_id=...
+  &amp;nonce=...
+  &amp;expires_at=...
+  &amp;rp_id=example.com
+  &amp;rp_id_hash=base64(sha256(rp_id))
+  &amp;callback=https://example.com/api/v1/session/{id}/complete</code></pre>
+
+          <h3>5.3 Approval flow</h3>
+          <ol>
+            <li>Server creates session</li>
+            <li>Browser shows QR</li>
+            <li>Phone scans QR</li>
+            <li>Phone signs canonical payload</li>
+            <li>Phone POSTs signed payload to <span class="inline">callback</span></li>
+            <li>Server verifies bindings and signature</li>
+            <li>Server marks session approved</li>
+            <li>Browser polling redirects to success</li>
+          </ol>
+        </section>
+
+        <section id="v4">
+          <h2>6. Protocol v4 — Stateless Mode (Recommended)</h2>
+          <h3>6.1 Characteristics</h3>
+          <ul>
+            <li><b>No server session storage</b> required for verification</li>
+            <li>Verifier nodes can be stateless and horizontally scaled</li>
+            <li>Approval token (<span class="inline">at</span>) is portable</li>
+            <li>Server needs a signing key for minting tokens</li>
+          </ul>
+
+          <h3>6.2 Server-signed session token (st)</h3>
+          <p>
+            The server mints a session token <span class="inline">st</span>, signed with Ed25519.
+            The client and phone treat it as opaque.
+          </p>
+
+          <h3>st claims</h3>
+          <pre><code>{
+  "v": 4,
+  "typ": "st",
+  "sid": "session-id",
+  "origin": "https://example.com",
+  "rp_id_hash": "base64(sha256(rp_id))",
+  "nonce": "...",
+  "issued_at": 1700000000,
+  "expires_at": 1700000300
+}</code></pre>
+
+          <h3>6.3 QR payload (v4)</h3>
+          <pre><code>dna://auth
+  ?v=4
+  &amp;st=&lt;server-signed-token&gt;
+  &amp;origin=https://example.com     (UI hint)
+  &amp;app=ExampleApp                (UI hint)</code></pre>
+
+          <p class="muted">
+            <span class="inline">origin</span> and <span class="inline">app</span> are display hints only and not security-critical.
+          </p>
+
+          <h3>6.4 Phone-signed payload (v4)</h3>
+          <p>
+            The phone signs a canonical JSON object that binds approval to <span class="inline">st</span> using
+            <span class="inline">st_hash = base64(sha256(st))</span>.
+          </p>
+
+          <h3>Canonical fields (exact order)</h3>
+          <pre><code>{
+  "expires_at": 1700000300,
+  "issued_at": 1700000000,
+  "nonce": "...",
+  "origin": "https://example.com",
+  "rp_id_hash": "...",
+  "session_id": "...",
+  "sid": "...",
+  "st_hash": "base64(sha256(st))"
+}</code></pre>
+
+          <h3>Canonicalization rules</h3>
+          <ul>
+            <li>UTF-8 bytes</li>
+            <li>No whitespace</li>
+            <li>Exact key order</li>
+            <li>Standard Base64 (with padding)</li>
+          </ul>
+
+          <h3>6.5 Verification flow (v4)</h3>
+          <ol>
+            <li>Browser requests <span class="inline">/api/v4/session</span></li>
+            <li>Server returns <span class="inline">{ st, sid }</span></li>
+            <li>Browser displays QR</li>
+            <li>Phone scans QR</li>
+            <li>Phone signs canonical payload</li>
+            <li>Phone POSTs to <span class="inline">/api/v4/verify</span></li>
+            <li>Server verifies <span class="inline">st</span>, bindings, fingerprint, allowlist (optional), and signature</li>
+            <li>Server issues <span class="inline">at</span> approval token</li>
+            <li>Browser polls status endpoint and redirects on approval</li>
+          </ol>
+        </section>
+
+        <section id="at">
+          <h2>7. Approval Token (at)</h2>
+          <p>
+            The <span class="inline">at</span> token is server-signed and portable. It can be used to continue an auth flow or authorize API calls.
+          </p>
+          <pre><code>{
+  "v": 4,
+  "typ": "at",
+  "sid": "...",
+  "st_hash": "...",
+  "rp_id_hash": "...",
+  "fingerprint": "...",
+  "issued_at": 1700000000,
+  "expires_at": 1700000060
+}</code></pre>
+        </section>
+
+        <section id="security">
+          <h2>8. Security Properties</h2>
+
+          <h3>8.1 Guarantees</h3>
+          <ul>
+            <li>Device-mediated consent</li>
+            <li>Origin binding</li>
+            <li>RP binding (WebAuthn-style)</li>
+            <li>Replay protection</li>
+            <li>Post-quantum signature security</li>
+            <li>No shared secrets or password database</li>
+          </ul>
+
+          <h3>8.2 Threat model</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Threat</th>
+                <th>Mitigation</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>QR reuse</td>
+                <td>Nonce + expiry</td>
+              </tr>
+              <tr>
+                <td>MITM</td>
+                <td>Origin + RP binding</td>
+              </tr>
+              <tr>
+                <td>Replay</td>
+                <td>st_hash + nonce</td>
+              </tr>
+              <tr>
+                <td>Server compromise</td>
+                <td>No user secrets stored</td>
+              </tr>
+              <tr>
+                <td>Quantum adversary</td>
+                <td>ML-DSA-87</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="config">
+          <h2>9. Configuration</h2>
+          <p>
+            Select protocol mode using environment variable:
+          </p>
+          <pre><code>AUTH_MODE=v3 | v4 | auto</code></pre>
+
+          <h3>Behavior</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Value</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="inline">v3</span></td>
+                <td>Stateful only</td>
+              </tr>
+              <tr>
+                <td><span class="inline">v4</span></td>
+                <td>Stateless only</td>
+              </tr>
+              <tr>
+                <td><span class="inline">auto</span></td>
+                <td>Prefer v4, allow v3 fallback</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="goals">
+          <h2>10. Design Goals</h2>
+          <ul>
+            <li>Minimal trust surface</li>
+            <li>Explicit cryptographic bindings</li>
+            <li>Human-verifiable consent</li>
+            <li>Server simplicity</li>
+            <li>Long-term cryptographic resilience</li>
+          </ul>
+        </section>
+
+        <section id="summary">
+          <h2>11. Summary</h2>
+          <p>
+            DNA QR Authentication is a clean alternative to passwords and traditional platform-bound authenticators,
+            enabling device-mediated login with post-quantum signatures and optional stateless verification.
+          </p>
+          <div class="callout">
+            <div class="icon" aria-hidden="true">✓</div>
+            <div>
+              <strong>Recommended:</strong> Use <span class="inline">v4</span> for stateless/CDN-scale deployments.
+              Use <span class="inline">v3</span> for simplest stateful flows or legacy compatibility.
+            </div>
+          </div>
+        </section>
+
+        <div class="footer">
+          <div>
+            <span class="inline">DNA QR Auth</span> · Protocol spec page
+          </div>
+          <div>
+            <a href="#top">Back to top ↑</a>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Copy a shareable URL (including current hash, if any)
+    document.getElementById("copyLink")?.addEventListener("click", async () => {
+      try {
+        const url = window.location.href;
+        await navigator.clipboard.writeText(url);
+        const btn = document.getElementById("copyLink");
+        const old = btn.textContent;
+        btn.textContent = "Copied ✓";
+        setTimeout(() => (btn.textContent = old), 1200);
+      } catch (e) {
+        alert("Could not copy link: " + e);
+      }
+    });
+  </script>
+</body>
+</html>

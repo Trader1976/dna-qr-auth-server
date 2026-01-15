@@ -25,3 +25,6 @@ audit/
 
 # Identity allowlist (contains sensitive fingerprints)
 app/known_identities.json
+
+#server keyfile
+.env

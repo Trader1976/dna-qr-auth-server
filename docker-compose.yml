@@ -5,13 +5,18 @@ services:
     # 🔒 Run container as your host user (likely UID 1000)
     user: "1000:1000"
 
+    env_file:
+      - .env
+
     environment:
-      - ORIGIN=https://refer-scanned-samba-packets.trycloudflare.com
-      - RP_ID=refer-scanned-samba-packets.trycloudflare.com
+      - ORIGIN=https://hop-legislation-radiation-rugs.trycloudflare.com
+      - RP_ID=hop-legislation-radiation-rugs.trycloudflare.com
       - RP_NAME=CPUNK
       - SESSION_TTL_SECONDS=120
       # optional / if you keep it:
       - CALLBACK_URL=https://YOURDOMAIN/api/callback
+
+      - AUTH_MODE=auto   # auto or v3 / v4
 
       # -------------------------------------------------
       # Audit logging
@@ -22,6 +27,7 @@ services:
       # Audit logging timestamps / timezone
       # -------------------------------------------------
       - TZ=Europe/Helsinki
+
 
 
     volumes:
