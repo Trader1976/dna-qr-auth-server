@@ -28,3 +28,6 @@ app/known_identities.json
 
 #server keyfile
 .env
+
+*.save
+*~
