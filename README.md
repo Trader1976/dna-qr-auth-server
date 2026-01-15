@@ -80,6 +80,7 @@ services:
 
 ⚠️ If SERVER_ED25519_SK_B64 is missing and AUTH_MODE=v4, the server will fail to start.
 
+
 🔐 Server Signing Key (Required for v4)
 v4 introduces server-signed stateless tokens:
 st — session token (QR)
@@ -102,8 +103,10 @@ raw = sk.private_bytes(
 print(base64.b64encode(raw).decode("ascii"))
 PY
 
+
 Save to .env
 SERVER_ED25519_SK_B64=+Y8K16fqD+UQpt51ZUOvfMlihjkA151Arb6riD7IxlW=
+
 
 Security notes
 This key is not a user identity
@@ -132,21 +135,25 @@ known_identities.json
 Verified via fingerprint ↔ public key
 Enforced server-side
 
+
 Audit Logging (v3 & v4)
 All security-relevant events are logged via the same audit system:
 Hash-chained (prev_hash → hash)
 Optional .state file
 Verifiable offline
 
+
 python3 verify_audit.py audit/signature_audit.jsonl \
   --state audit/signature_audit.state \
   --strict-chain \
   --strict-bytes
 
+
 v4 logs include:
 st issuance
 v4 verification result
 approval token (at) issuance
+
 
 Security Properties
 ✅ Post-quantum cryptography (NIST level 5)
@@ -155,6 +162,7 @@ Security Properties
 ✅ RP binding (origin / rp_id / rp_id_hash)
 ✅ No shared secrets
 ✅ No browser-stored credentials
+
 
 Changelog
 Version	Date	Notes
