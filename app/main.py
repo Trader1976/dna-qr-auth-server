@@ -28,6 +28,11 @@
 # keep V4_APPROVALS is to make a browser redirect UX easy in a single-node demo.
 # In a true CDN / multi-node deployment, replace the polling cache with Redis or
 # have the browser submit the returned "at" token directly to the relying party.
+#
+# WARNING (DEPLOYMENT):
+# - V4_APPROVALS is an in-memory dict: it is NOT shared across Uvicorn workers
+#   or across nodes. If you run multiple workers/nodes, /api/v4/status polling
+#   will randomly miss approvals. Use Redis/shared cache or remove polling.
 # -----------------------------------------------------------------------------
 
 
@@ -64,7 +69,6 @@ from .v4_tokens import (
 ED25519_SK = load_ed25519_private_key_from_b64(settings.SERVER_ED25519_SK_B64)
 ED25519_PK = ED25519_SK.public_key()
 
-
 # -----------------------------------------------------------------------------
 # v4 UX helper cache (NOT part of stateless verification!)
 # -----------------------------------------------------------------------------
@@ -75,7 +79,6 @@ ED25519_PK = ED25519_SK.public_key()
 # True stateless/CDN: replace with Redis (shared) or remove browser polling and
 # have the browser submit "at" to the RP directly.
 V4_APPROVALS: dict[str, dict] = {}
-
 
 # -----------------------------------------------------------------------------
 # Feature gates (deploy-time protocol selection)
@@ -107,30 +110,41 @@ def _require_v3():
 
 
 # -----------------------------------------------------------------------------
-# Time + canonicalization helpers
+# Time + cache helpers
 # -----------------------------------------------------------------------------
 def _now_epoch() -> int:
     # Keep time source centralized for easier testing/mocking.
     return int(time.time())
 
 
+def _prune_v4_approvals(now: int | None = None) -> int:
+    """Best-effort pruning to prevent unbounded growth (demo UX only)."""
+    now = now or _now_epoch()
+    dead = [k for k, v in V4_APPROVALS.items() if now > int(v.get("expires_at", 0))]
+    for k in dead:
+        V4_APPROVALS.pop(k, None)
+    return len(dead)
+
+
+# -----------------------------------------------------------------------------
+# Canonicalization helpers
+# -----------------------------------------------------------------------------
+def _assert_safe_token_str(value: str, field: str):
+    # Canonical JSON is built by string formatting; disallow characters that could
+    # alter JSON structure if later fields become user-controlled.
+    if any(c in value for c in ['"', "\\", "\n", "\r", "\t"]):
+        raise HTTPException(400, f"invalid characters in {field}")
+
+
 def _canonical_v4_phone_auth(sp: dict) -> bytes:
     """
     Canonical bytes for the PHONE-SIGNED payload in v4.
-
-    Architectural rationale:
-      - We treat canonicalization as part of the protocol, not an "implementation
-        detail". It must be deterministic across languages.
-      - We keep it rigid and explicit (mirroring the v3 approach) to prevent
-        subtle drift (whitespace, key order, integer formatting, etc).
 
     Canonicalization contract:
       - UTF-8 bytes
       - no whitespace
       - fixed key order
       - integer timestamps (issued_at/expires_at)
-
-    The server uses these bytes as input to ML-DSA-87 verification.
     """
     # required fields & types
     try:
@@ -148,6 +162,14 @@ def _canonical_v4_phone_auth(sp: dict) -> bytes:
     # optional but recommended
     session_id = str(sp.get("session_id", sid))
 
+    # Guardrails: keep canonical JSON safe even if fields expand in future
+    _assert_safe_token_str(nonce, "nonce")
+    _assert_safe_token_str(origin, "origin")
+    _assert_safe_token_str(rp_id_hash, "rp_id_hash")
+    _assert_safe_token_str(st_hash, "st_hash")
+    _assert_safe_token_str(sid, "sid")
+    _assert_safe_token_str(session_id, "session_id")
+
     canonical = (
         f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
         f'"origin":"{origin}","rp_id_hash":"{rp_id_hash}",'
@@ -159,10 +181,6 @@ def _canonical_v4_phone_auth(sp: dict) -> bytes:
 # -----------------------------------------------------------------------------
 # FastAPI application
 # -----------------------------------------------------------------------------
-# Architectural note:
-# - This service is a verifier for a very specific auth protocol; we keep the
-#   surface area small: a landing page, QR rendering, verify/complete endpoints,
-#   and polling endpoints.
 app = FastAPI(
     title="DNA QR Auth Server",
     version="0.1.0",
@@ -172,14 +190,11 @@ BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 # Static assets (CSS / JS)
-# Architectural note:
-# - Keep UI assets separate from protocol/crypto logic.
 app.mount(
     "/static",
     StaticFiles(directory=str(BASE_DIR / "static")),
     name="static",
 )
-
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -190,11 +205,7 @@ MIN_PROTOCOL_V = 3
 def _b64decode_loose(s: str) -> bytes:
     """
     Decode Base64 with optional missing padding.
-
-    Architectural note:
-      - The wire format should be standard Base64, but implementations sometimes
-        omit '=' padding. We normalize rather than rejecting.
-      - validate=True rejects non-Base64 characters early (hard fail on garbage).
+    Standard Base64 (NOT urlsafe).
     """
     s = str(s).strip()
     s += "=" * (-len(s) % 4)
@@ -202,25 +213,14 @@ def _b64decode_loose(s: str) -> bytes:
 
 
 def _fingerprint_from_pubkey(pubkey: bytes) -> str:
-    """
-    Compute DNA identity fingerprint from a public key.
-
-    Architectural note:
-      - fingerprint is the stable identifier (public, loggable).
-      - public key is transmitted for verification (no key lookup needed).
-    """
+    """Compute DNA identity fingerprint from a public key."""
     return hashlib.sha3_512(pubkey).hexdigest()
 
 
 def _sha256_b64(s: str) -> str:
     """
     WebAuthn-like helper: rp_id_hash = base64( SHA-256(rp_id) ).
-
-    Architectural note:
-      - We bind approvals to an RP (domain) without carrying the raw rp_id in all
-        signed objects.
-      - Use STANDARD Base64 (not urlsafe) to match phone implementation.
-      - rp_id MUST be domain-only and normalized.
+    Standard Base64 (NOT urlsafe) to match phone.
     """
     digest = hashlib.sha256(s.encode("utf-8")).digest()
     return base64.b64encode(digest).decode("ascii")
@@ -233,31 +233,21 @@ def _sha256_b64(s: str) -> str:
 def v4_qr_svg(st: str):
     _require_v4()
 
-    # Architectural note:
-    # - origin/app are UI hints. Security binding comes from st claims and
-    #   server-side settings checks in /api/v4/verify.
     origin_hint = quote(settings.ORIGIN.rstrip("/"), safe="")
     app_hint = quote(settings.RP_NAME or "CPUNK", safe="")
 
-    # st is an opaque, signed token; encode to avoid query parsing issues.
     st_enc = quote(st, safe="")
-
     qr_uri = f"dna://auth?v=4&st={st_enc}&origin={origin_hint}&app={app_hint}"
+
     svg_bytes = make_auth_qr_svg_bytes(qr_uri)
     return Response(content=svg_bytes, media_type="image/svg+xml")
 
 
 @app.get("/", response_class=HTMLResponse)
 def landing(request: Request):
-    # Architectural note:
-    # - Landing is UX only. It selects which flow the browser will use.
-    # - "auto" prefers v4 to push stateless mode as default.
     mode = settings.AUTH_MODE  # "auto" | "v3" | "v4"
 
     if mode in ("v4", "auto"):
-        # v4 landing:
-        # - browser mints a session via JS (/api/v4/session)
-        # - browser polls /api/v4/status?sid=... (demo cache)
         return templates.TemplateResponse(
             "landing_v4.html",
             {
@@ -268,8 +258,7 @@ def landing(request: Request):
             },
         )
 
-    # v3 landing:
-    # - server creates session immediately and stores it in store (stateful)
+    # v3 landing: server creates session immediately and stores it (stateful)
     sess = store.create_session(
         origin=settings.ORIGIN,
         ttl_seconds=settings.SESSION_TTL_SECONDS,
@@ -278,7 +267,7 @@ def landing(request: Request):
         scopes=settings.SCOPES,
     )
 
-    # Debug-only: QR_URI shows exactly what is being encoded
+    # Debug-only
     print("QR_URI:", sess.qr_uri, flush=True)
 
     return templates.TemplateResponse(
@@ -300,9 +289,6 @@ def landing(request: Request):
 def session_qr_svg(session_id: str):
     _require_v3()
 
-    # Architectural note:
-    # - QR generation is pure rendering; the only server-side decision here is
-    #   "does the session exist?"
     sess = store.get(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -315,9 +301,6 @@ def session_qr_svg(session_id: str):
 def get_challenge(session_id: str):
     _require_v3()
 
-    # Architectural note:
-    # - Optional debugging endpoint; not required for the flow.
-    # - Keep output minimal and never return secrets.
     sess = store.get(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -346,20 +329,7 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     _require_v3()
     """
     v3: Completes a QR authentication session (stateful).
-
-    Architectural summary:
-      - The server is the source of truth for session state (pending/approved/...).
-      - The phone submits a signed payload + pubkey.
-      - The server verifies:
-          * session validity (pending, not expired)
-          * origin binding
-          * rp_id binding + rp_id_hash binding
-          * fingerprint ↔ pubkey binding
-          * allowlist policy (optional)
-          * ML-DSA-87 signature over canonical bytes
-      - On success, store response + set session APPROVED.
     """
-    # --- Session state machine guardrails (stateful correctness)
     sess = store.get(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
@@ -371,7 +341,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     if sess.status != SessionStatus.PENDING:
         raise HTTPException(409, "session not pending")
 
-    # --- Envelope checks (protocol hygiene)
     if body.get("type") != "dna.auth.response":
         raise HTTPException(400, "invalid type")
 
@@ -392,7 +361,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     if payload_v != MIN_PROTOCOL_V:
         raise HTTPException(400, "invalid version")
 
-    # --- Required fields (explicit)
     for k in ("session_id", "fingerprint", "signature", "signed_payload", "pubkey_b64"):
         if k not in body:
             raise HTTPException(400, f"missing field: {k}")
@@ -404,21 +372,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     if not isinstance(signed_payload, dict):
         raise HTTPException(400, "signed_payload must be object")
 
-    # Debug-only
-    try:
-        print(
-            "CLIENT_RESPONSE:",
-            {
-                "body_v": body.get("v"),
-                "signed_payload_keys": sorted(signed_payload.keys()),
-                "rp_id": signed_payload.get("rp_id"),
-                "rp_id_hash": signed_payload.get("rp_id_hash"),
-            },
-            flush=True,
-        )
-    except Exception:
-        pass
-
     required = ["origin", "session_id", "nonce", "issued_at", "expires_at", "rp_id", "rp_id_hash"]
     for k in required:
         if k not in signed_payload:
@@ -427,11 +380,9 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     if signed_payload["session_id"] != session_id:
         raise HTTPException(400, "signed_payload.session_id mismatch")
 
-    # Origin binding (prevents cross-site approval)
     if str(signed_payload["origin"]).rstrip("/") != sess.origin.rstrip("/"):
         raise HTTPException(400, "origin mismatch")
 
-    # --- Replay window (defense in depth)
     try:
         iat = int(signed_payload["issued_at"])
         exp = int(signed_payload["expires_at"])
@@ -448,7 +399,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     client_ip = (request.client.host if request.client else None)
     user_agent = request.headers.get("user-agent")
 
-    # store.seen_nonce is v3-only stateful replay protection
     if store.seen_nonce(sess.session_id, nonce):
         append_event(
             {
@@ -467,18 +417,15 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
         )
         raise HTTPException(409, "replay nonce")
 
-    # --- Decode public inputs
     try:
         signature = _b64decode_loose(body["signature"])
         pubkey = _b64decode_loose(body["pubkey_b64"])
     except Exception:
         raise HTTPException(400, "invalid base64 encoding")
 
-    # Identity binding: fingerprint must match pubkey
     claimed_fp = str(body["fingerprint"]).lower().strip()
     computed_fp = _fingerprint_from_pubkey(pubkey)
 
-    # RP binding (domain)
     rp_id = str(signed_payload["rp_id"]).lower().strip()
     expected_rp = str(sess.rp_id).lower().strip()
 
@@ -512,7 +459,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             },
         )
 
-    # RP hash binding (WebAuthn-like)
     rp_id_hash = str(signed_payload["rp_id_hash"]).strip()
     expected_hash = _sha256_b64(rp_id)
 
@@ -547,7 +493,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             },
         )
 
-    # Optional allowlist policy (access control layer)
     if not is_fingerprint_allowed(computed_fp):
         append_event(
             {
@@ -578,7 +523,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             },
         )
 
-    # Canonical bytes (must match phone exactly)
     canonical = (
         f'{{"expires_at":{exp},"issued_at":{iat},"nonce":"{nonce}",'
         f'"origin":"{origin}","rp_id":"{rp_id}","rp_id_hash":"{rp_id_hash}",'
@@ -586,7 +530,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
     )
     canonical_bytes = canonical.encode("utf-8")
 
-    # Identity binding check (fingerprint ↔ pubkey)
     if claimed_fp != computed_fp:
         append_event(
             {
@@ -618,7 +561,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             },
         )
 
-    # Crypto verification (PQClean, native)
     try:
         ok = verify_mldsa87_signature(pubkey, canonical_bytes, signature)
     except Exception as e:
@@ -677,7 +619,6 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
             },
         )
 
-    # Success path: persist response for the browser/RP + mark approved
     store.save_response(
         sess.session_id,
         {
@@ -726,14 +667,10 @@ def complete(session_id: str, request: Request, body: dict = Body(...)):
 def session_status(session_id: str):
     _require_v3()
 
-    # Architectural note:
-    # - This endpoint is intentionally "public status only".
-    # - It MUST NOT leak secrets; it returns a sanitized view.
     sess = store.get(session_id)
     if not sess:
         raise HTTPException(404, "session not found")
 
-    # Automatic transition: pending → expired
     if sess.is_expired and sess.status == SessionStatus.PENDING:
         store.set_status(sess.session_id, SessionStatus.EXPIRED)
 
@@ -745,8 +682,6 @@ def session_status(session_id: str):
 # -----------------------------------------------------------------------------
 @app.get("/success", response_class=HTMLResponse)
 def success(request: Request):
-    # Architectural note:
-    # - Kept mode-agnostic: both v3 and v4 redirect here.
     return templates.TemplateResponse("success.html", {"request": request})
 
 
@@ -759,10 +694,8 @@ MIN_PROTOCOL_V4 = 4
 @app.post("/api/v4/session")
 def v4_create_session():
     _require_v4()
+    _prune_v4_approvals()
 
-    # Architectural note:
-    # - This endpoint mints a short-lived signed token (st).
-    # - No DB writes; correctness and binding depend on signatures and TTL.
     iat = _now_epoch()
     exp = iat + int(settings.SESSION_TTL_SECONDS)
 
@@ -782,7 +715,6 @@ def v4_create_session():
 
     st = sign_token_v4(ED25519_SK, st_payload)
 
-    # Optional: include UI hints for logging / debugging / nicer phone UI
     qr_uri = (
         f"dna://auth?v=4&st={quote(st, safe='')}"
         f"&origin={quote(settings.ORIGIN.rstrip('/'), safe='')}"
@@ -804,50 +736,16 @@ def v4_create_session():
 
 @app.post("/api/v4/verify")
 def v4_verify(request: Request, body: dict = Body(...)):
-    """
-    Stateless verification (v4).
-
-    Architectural summary:
-      - "st" is server-signed (Ed25519) and defines the session claims.
-      - The phone signs a canonical payload (ML-DSA-87) that MUST mirror the st
-        claims and includes st_hash = base64(sha256(st)).
-      - The verifier checks:
-          * token validity/TTL (st)
-          * st_hash binds approval to THIS st
-          * claim equality (sid/origin/rp_id_hash/nonce/iat/exp)
-          * origin and rp_id_hash match server config
-          * fingerprint ↔ pubkey binding
-          * allowlist policy (optional)
-          * ML-DSA-87 signature correctness
-      - On success, server issues an approval token "at" (Ed25519).
-      - For demo browser redirect, we store "at" briefly in V4_APPROVALS.
-    """
     _require_v4()
+    _prune_v4_approvals()
 
     def _fail(status: int, msg: str, **extra):
-        # Architectural note:
-        # - Return structured JSON so the phone can display precise reasons.
-        # - Keep error surface modest (no sensitive internal details).
-        detail = {
-            "error": "bad_request" if status == 400 else "not_authorized",
-            "message": msg,
-        }
+        detail = {"error": "bad_request" if status == 400 else "not_authorized", "message": msg}
         if extra:
             detail.update(extra)
         raise HTTPException(status_code=status, detail=detail)
 
     try:
-        # Debug telemetry (developer UX)
-        try:
-            print("V4_VERIFY_KEYS:", sorted(body.keys()), flush=True)
-            sp0 = body.get("signed_payload")
-            print("V4_VERIFY_SIGNED_PAYLOAD_TYPE:", type(sp0), flush=True)
-            if isinstance(sp0, dict):
-                print("V4_VERIFY_SP_KEYS:", sorted(sp0.keys()), flush=True)
-            print("V4_VERIFY_ST_PREFIX:", str(body.get("st", ""))[:32], flush=True)
-        except Exception:
-            pass
-
         # Envelope
         if body.get("type") != "dna.auth.response":
             _fail(400, "invalid type")
@@ -876,11 +774,7 @@ def v4_verify(request: Request, body: dict = Body(...)):
             _fail(400, "invalid st", detail=str(e)[:120])
 
         if st_obj.get("v") != 4 or st_obj.get("typ") != "st":
-            _fail(
-                400,
-                "invalid st claims",
-                claims={"v": st_obj.get("v"), "typ": st_obj.get("typ")},
-            )
+            _fail(400, "invalid st claims", claims={"v": st_obj.get("v"), "typ": st_obj.get("typ")})
 
         # TTL / time window
         now = _now_epoch()
@@ -895,25 +789,59 @@ def v4_verify(request: Request, body: dict = Body(...)):
         if st_exp <= st_iat:
             _fail(400, "invalid st time window")
 
-        # st_hash binding (prevents replay using different st)
+        # st_hash binding
         st_hash = base64.b64encode(hashlib.sha256(st.encode("utf-8")).digest()).decode("ascii")
         got_st_hash = str(signed_payload.get("st_hash", "")).strip()
         if got_st_hash != st_hash:
             _fail(400, "st_hash mismatch", expected=st_hash, got=got_st_hash)
 
-        # Claim mirroring (phone payload MUST match st claims)
-        for k in ("sid", "origin", "rp_id_hash", "nonce", "issued_at", "expires_at"):
-            if str(signed_payload.get(k)) != str(st_obj.get(k)):
-                _fail(400, f"claim mismatch: {k}", expected=st_obj.get(k), got=signed_payload.get(k))
+        # Claim mirroring (be strict on ints for timestamps)
+        def _req_str(k: str) -> str:
+            v = signed_payload.get(k)
+            if v is None:
+                _fail(400, f"missing signed_payload field: {k}")
+            return str(v)
+
+        def _req_int(k: str) -> int:
+            v = signed_payload.get(k)
+            if v is None:
+                _fail(400, f"missing signed_payload field: {k}")
+            try:
+                return int(v)
+            except Exception:
+                _fail(400, f"signed_payload.{k} must be int")
+
+        if _req_str("sid") != str(st_obj.get("sid")):
+            _fail(400, "claim mismatch: sid", expected=st_obj.get("sid"), got=signed_payload.get("sid"))
+        if _req_str("origin") != str(st_obj.get("origin")):
+            _fail(400, "claim mismatch: origin", expected=st_obj.get("origin"), got=signed_payload.get("origin"))
+        if _req_str("rp_id_hash") != str(st_obj.get("rp_id_hash")):
+            _fail(400, "claim mismatch: rp_id_hash", expected=st_obj.get("rp_id_hash"), got=signed_payload.get("rp_id_hash"))
+        if _req_str("nonce") != str(st_obj.get("nonce")):
+            _fail(400, "claim mismatch: nonce", expected=st_obj.get("nonce"), got=signed_payload.get("nonce"))
+        if _req_int("issued_at") != int(st_obj.get("issued_at")):
+            _fail(400, "claim mismatch: issued_at", expected=st_obj.get("issued_at"), got=signed_payload.get("issued_at"))
+        if _req_int("expires_at") != int(st_obj.get("expires_at")):
+            _fail(400, "claim mismatch: expires_at", expected=st_obj.get("expires_at"), got=signed_payload.get("expires_at"))
 
         # Origin binding to deployment configuration
         if str(st_obj["origin"]).rstrip("/") != settings.ORIGIN.rstrip("/"):
-            _fail(400, "origin mismatch", expected=settings.ORIGIN.rstrip("/"), got=str(st_obj["origin"]).rstrip("/"))
+            _fail(
+                400,
+                "origin mismatch",
+                expected=settings.ORIGIN.rstrip("/"),
+                got=str(st_obj["origin"]).rstrip("/"),
+            )
 
         # RP binding via rp_id_hash (deployment config)
         expected_rp_hash = _sha256_b64(settings.RP_ID.lower().strip())
         if str(st_obj["rp_id_hash"]).strip() != expected_rp_hash:
-            _fail(403, "rp_id_hash mismatch", expected=expected_rp_hash, got=str(st_obj["rp_id_hash"]).strip())
+            _fail(
+                403,
+                "rp_id_hash mismatch",
+                expected=expected_rp_hash,
+                got=str(st_obj["rp_id_hash"]).strip(),
+            )
 
         # Decode inputs
         try:
@@ -946,7 +874,7 @@ def v4_verify(request: Request, body: dict = Body(...)):
             )
             _fail(403, "fingerprint_pubkey_mismatch")
 
-        # Policy: allowlist (optional access control)
+        # Policy: allowlist
         if not is_fingerprint_allowed(computed_fp):
             append_event(
                 {
@@ -1050,11 +978,12 @@ def v4_verify(request: Request, body: dict = Body(...)):
             }
         )
 
-        # Browser redirect cache (demo UX)
+        # Demo browser redirect cache (NOT stateless across workers/nodes)
         sid1 = str(st_obj.get("sid", "")).strip()
         sid2 = str(signed_payload.get("sid", "")).strip()
         sid3 = str(body.get("session_id", "")).strip()
 
+        # Keep multi-key writes while debugging; tighten later (fail-fast).
         store_keys = {k for k in (sid1, sid2, sid3) if k}
         entry = {"at": at, "fingerprint": claimed_fp, "expires_at": _now_epoch() + 120}
 
@@ -1062,11 +991,9 @@ def v4_verify(request: Request, body: dict = Body(...)):
             V4_APPROVALS[k] = entry
 
         print("V4_APPROVED stored keys:", sorted(store_keys), flush=True)
-
         return {"ok": True, "v": 4, "at": at}
 
     except HTTPException as e:
-        # Log server-side for iteration speed (do not leak sensitive internals)
         try:
             print("V4_VERIFY_FAIL:", e.detail, flush=True)
         except Exception:
@@ -1078,9 +1005,6 @@ def v4_verify(request: Request, body: dict = Body(...)):
 def v4_validate(body: dict = Body(...)):
     _require_v4()
 
-    # Architectural note:
-    # - validate is a convenience endpoint for RPs/services to validate "at".
-    # - In production, many services can validate locally using ED25519_PK.
     at = str(body.get("at", "")).strip()
     if not at:
         raise HTTPException(400, "missing at")
@@ -1103,10 +1027,8 @@ def v4_validate(body: dict = Body(...)):
 @app.get("/api/v4/status")
 def v4_status(sid: str):
     _require_v4()
+    _prune_v4_approvals()
 
-    # Architectural note:
-    # - This is purely for browser polling UX in a demo flow.
-    # - It is NOT required by the core v4 protocol and is not "stateless" across nodes.
     obj = V4_APPROVALS.get(sid)
     if not obj:
         return {"ok": True, "approved": False}

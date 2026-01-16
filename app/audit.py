@@ -14,6 +14,7 @@ from .config import settings
 AUDIT_LOG_PATH = Path(settings.AUDIT_LOG_PATH)
 AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 AUDIT_STATE_PATH = AUDIT_LOG_PATH.with_suffix(".state")
+AUDIT_LOG_BYTES_B64: bool = False
 
 # -----------------------------------------------------------------------------
 # Internal helpers
@@ -37,18 +38,17 @@ def _now_iso_local() -> str:
 
 
 def _json_default(o):
-    """
-    Make audit logging robust: convert non-JSON types (notably bytes) to JSON-safe objects.
-    """
     if isinstance(o, (bytes, bytearray, memoryview)):
         b = bytes(o)
-        # Keep logs usable: include length and sha3_256; include b64 only if needed later.
-        return {
+        obj = {
             "_type": "bytes",
             "len": len(b),
             "sha3_256": hashlib.sha3_256(b).hexdigest(),
-            "b64": base64.b64encode(b).decode("ascii"),
+            "hash_alg": "sha3-256",
         }
+        if getattr(settings, "AUDIT_LOG_BYTES_B64", False):
+            obj["b64"] = base64.b64encode(b).decode("ascii")
+        return obj
     if isinstance(o, Path):
         return str(o)
     return str(o)
