@@ -154,6 +154,7 @@ class StatsBar(Static):
     denied = reactive(0)
     expired = reactive(0)
     other = reactive(0)
+    hashes_on = reactive(True)
 
     paused = reactive(False)
     filter_text = reactive("")
@@ -175,6 +176,10 @@ class StatsBar(Static):
         chain = "OK" if self.chain_ok else "BROKEN"
         chain_style = "green" if self.chain_ok else "red"
         parts.append(f"[b]chain[/b]: [{chain_style}]{chain}[/{chain_style}] ({self.chain_breaks})")
+
+        hashes = "ON" if self.hashes_on else "OFF"
+        hashes_style = "green" if self.hashes_on else "red"
+        parts.append(f"[b]hashes[/b]: [{hashes_style}]{hashes}[/{hashes_style}]")
 
         if self.paused:
             parts.append("[yellow][b]PAUSED[/b][/yellow]")
@@ -384,8 +389,9 @@ class AuditTui(App):
             row_index = table.cursor_coordinate[0]
 
         if row_index is None or not (0 <= row_index < len(self._visible_keys)):
-            details.show_event(None)
+            details.show_event(None, show_hashes=self.show_hashes)
             return
+        self.query_one(StatsBar).hashes_on = self.show_hashes
 
         key = self._visible_keys[row_index]
         e = self._row_to_event.get(key)
@@ -473,6 +479,7 @@ class AuditTui(App):
                 show_hashes=self.show_hashes,
             )
 
+        self.query_one(StatsBar).hashes_on = self.show_hashes
 
         table.focus()  # <-- key line: no mouse needed
 
@@ -500,7 +507,7 @@ class AuditTui(App):
         stats.chain_ok = True
         stats.chain_breaks = 0
 
-        self.query_one(DetailsPane).show_event(None)
+        self.query_one(DetailsPane).show_event(None, show_hashes=self.show_hashes)
 
     def action_focus_filter(self) -> None:
         self.query_one(Input).focus()
@@ -523,7 +530,7 @@ class AuditTui(App):
 
         if 0 <= row_index < len(self._visible_keys):
             key = self._visible_keys[row_index]
-            details.show_event(self._row_to_event.get(key))
+            details.show_event(self._row_to_event.get(key), show_hashes=self.show_hashes)
 
     # --- Events / UI callbacks
 
@@ -556,7 +563,7 @@ class AuditTui(App):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         # Optional: live-update details while moving with arrows (htop-like).
         e = self._row_to_event.get(event.row_key)
-        self.query_one(DetailsPane).show_event(e)
+        self.query_one(DetailsPane).show_event(e, show_hashes=self.show_hashes)
 
     # --- Core logic
 
@@ -680,7 +687,7 @@ class AuditTui(App):
         # update details for the highlighted row
         if self._visible_keys:
             key = self._visible_keys[-1]
-            self.query_one(DetailsPane).show_event(self._row_to_event.get(key))
+            self.query_one(DetailsPane).show_event(self._row_to_event.get(key), show_hashes=self.show_hashes)
 
     def _rebuild_table(self, keep_tail: bool = False) -> None:
         """Rebuild table from self._events, applying filter. keep_tail keeps only last max_rows matches."""
