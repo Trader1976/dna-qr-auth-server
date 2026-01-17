@@ -31,3 +31,9 @@ app/known_identities.json
 
 *.save
 *~
+
+# audit_viewer files
+.venv/
+__pycache__/
+*.pyc
+.cache/

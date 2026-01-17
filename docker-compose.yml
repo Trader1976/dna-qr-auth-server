@@ -9,8 +9,8 @@ services:
       - .env
 
     environment:
-      - ORIGIN=https://hop-legislation-radiation-rugs.trycloudflare.com
-      - RP_ID=hop-legislation-radiation-rugs.trycloudflare.com
+      - ORIGIN=https://sudden-comic-idea-insight.trycloudflare.com
+      - RP_ID=sudden-comic-idea-insight.trycloudflare.com
       - RP_NAME=CPUNK
       - SESSION_TTL_SECONDS=120
       # optional / if you keep it:
