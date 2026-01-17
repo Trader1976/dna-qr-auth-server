@@ -2,16 +2,26 @@
 """
 DNA QR Auth Audit TUI (Textual)
 
-Loads a JSONL audit log and (by default) follows new lines.
+Viewer-first: loads a JSONL audit log on startup and (by default) follows new lines.
 
-Keys:
+Key concepts
+- Table (left): fast scan of events
+- Details pane (right): readable breakdown of the selected event
+- Follow mode: app reads new JSONL lines and appends them
+- Pinning: Space "pins" the current details so follow/selection won't overwrite it
+- Hash toggle: 'h' hides/shows hash/prev_hash in details to reduce crypto noise
+
+Keys
   q        Quit
   p        Pause/Resume follow updates
   c        Clear table
-  /        Focus filter input (substring)
+  f, /     Focus filter input (substring)
   Esc      Leave filter input, focus table
-  Enter    Apply filter (when in filter input) OR show details for highlighted row (when table focused)
+  Enter    Apply filter (when filter input is focused)
   ↑↓       Move selection in table (details update live)
+  Space    Pin details (inspect current row)
+  u        Unpin (resume following latest row)
+  h        Toggle hash visibility in details
 """
 
 from __future__ import annotations
@@ -27,16 +37,18 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.widgets import DataTable, Footer, Input, Static
 
 __app_name__ = "DNA QR Auth Audit TUI"
 __version__ = "1.0.0"
+
 
 # -----------------------------
 # Utilities
 # -----------------------------
 
 def safe_get(d: Dict[str, Any], key: str, default: str = "") -> str:
+    """Safe dict get that always returns a string."""
     v = d.get(key, default)
     if v is None:
         return default
@@ -44,12 +56,14 @@ def safe_get(d: Dict[str, Any], key: str, default: str = "") -> str:
 
 
 def short(s: str, n: int) -> str:
+    """Truncate string to n characters with an ellipsis."""
     if len(s) <= n:
         return s
     return s[: max(0, n - 1)] + "…"
 
 
 def ts_to_hhmmss(ts: Optional[int]) -> str:
+    """Convert unix ts -> HH:MM:SS, best effort."""
     if not ts:
         return ""
     try:
@@ -59,6 +73,7 @@ def ts_to_hhmmss(ts: Optional[int]) -> str:
 
 
 def fmt_origin(origin: str) -> str:
+    """Compact origin display by stripping scheme."""
     origin = origin.strip()
     if origin.startswith("http://"):
         return origin[7:]
@@ -68,6 +83,7 @@ def fmt_origin(origin: str) -> str:
 
 
 def classify_event(e: Dict[str, Any]) -> str:
+    """Human label for an event row."""
     reason = safe_get(e, "reason")
     result = safe_get(e, "result")
     return reason or result or "event"
@@ -78,14 +94,13 @@ def classify_event(e: Dict[str, Any]) -> str:
 # -----------------------------
 
 class JsonlReader:
-    """Reads JSONL records from a file, with optional rotation handling."""
+    """Reads JSONL records from a file, with rotation handling."""
 
     def __init__(self, path: str, start_at_end: bool = False):
         self.path = path
         self.start_at_end = start_at_end
         self._fp = None
         self._ino = None
-        self._pin_details = False
 
     def open(self) -> None:
         self._fp = open(self.path, "r", encoding="utf-8", errors="replace")
@@ -102,6 +117,7 @@ class JsonlReader:
                 self._ino = None
 
     def _reopen_if_rotated(self) -> None:
+        """If file inode changed, reopen (log rotate / replace)."""
         try:
             st = os.stat(self.path)
         except FileNotFoundError:
@@ -113,6 +129,7 @@ class JsonlReader:
             self.open()
 
     def read_one(self) -> Optional[Dict[str, Any]]:
+        """Read one JSON object (dict) from JSONL, or None if no new line."""
         if not self._fp:
             self.open()
 
@@ -142,20 +159,21 @@ class JsonlReader:
 
 @dataclass
 class ChainState:
+    """Lightweight hash-link check state."""
     last_hash: Optional[str] = None
-    last_ts_iso: Optional[str] = None
     ok: bool = True
     breaks: int = 0
 
 
 class StatsBar(Static):
+    """Top stats line with counters + current filter + status flags."""
     issued = reactive(0)
     approved = reactive(0)
     denied = reactive(0)
     expired = reactive(0)
     other = reactive(0)
-    hashes_on = reactive(True)
 
+    hashes_on = reactive(True)
     paused = reactive(False)
     filter_text = reactive("")
     chain_ok = reactive(True)
@@ -164,7 +182,8 @@ class StatsBar(Static):
     last_time = reactive("")
 
     def render(self) -> str:
-        parts = []
+        parts: list[str] = []
+
         parts.append(f"[b]Events[/b]: {self.events_total}")
         parts.append(f"[b]issued[/b]: {self.issued}")
         parts.append(f"[b]approved[/b]: {self.approved}")
@@ -191,9 +210,11 @@ class StatsBar(Static):
 
 
 class DetailsPane(Static):
+    """Right-side readable breakdown of a selected event."""
+
     def show_event(self, e: Optional[Dict[str, Any]], show_hashes: bool = True) -> None:
         if not e:
-            self.update("↑↓ select • Space inspect • / filter • p pause")
+            self.update("↑↓ select • Space inspect • f / filter • p pause • h hashes • u unpin")
             return
 
         def color_result(r: str) -> str:
@@ -208,65 +229,59 @@ class DetailsPane(Static):
 
         lines: list[str] = []
 
-        # --- Header / outcome ---
+        # Outcome
         if "result" in e:
             lines.append(f"[b]Result[/b]: {color_result(str(e['result']))}")
-
         if "reason" in e:
             lines.append(f"[b]Reason[/b]: [yellow]{e['reason']}[/yellow]")
-
         lines.append("")
 
-        # --- Time ---
+        # Time
         if "ts_iso" in e:
             lines.append(f"[b]Time[/b]: [cyan]{e['ts_iso']}[/cyan]")
         elif "ts" in e:
             lines.append(f"[b]Time[/b]: [cyan]{e['ts']}[/cyan]")
 
-        # --- Origin / session ---
+        # Origin/session
         if "origin" in e:
             lines.append(f"[b]Origin[/b]: [yellow]{e['origin']}[/yellow]")
         if "session_id" in e:
             lines.append(f"[b]Session[/b]: [#00ff66]{e['session_id']}[/#00ff66]")
         if "nonce" in e:
             lines.append(f"[b]Nonce[/b]: [#00ff66]{e['nonce']}[/#00ff66]")
-
         lines.append("")
 
-        # --- Identity / crypto ---
+        # Identity/crypto
         if "claimed_fp" in e:
             lines.append(f"[b]Claimed FP[/b]: [#00ff66]{e['claimed_fp']}[/#00ff66]")
         if "pubkey_fp" in e:
             lines.append(f"[b]Pubkey FP[/b]: [#00ff66]{e['pubkey_fp']}[/#00ff66]")
         if "alg" in e:
             lines.append(f"[b]Algorithm[/b]: [cyan]{e['alg']}[/cyan]")
-
         lines.append("")
 
-        # --- Network ---
+        # Network
         if "request_ip" in e:
             lines.append(f"[b]IP[/b]: [yellow]{e['request_ip']}[/yellow]")
         if "user_agent" in e:
             lines.append(f"[b]User-Agent[/b]: [dim]{e['user_agent']}[/dim]")
-
         lines.append("")
 
-        # --- Hash chain (toggleable) ---
+        # Hash chain (toggleable)
         if show_hashes:
             if "hash" in e:
                 lines.append(f"[b]Hash[/b]: [dim]{e['hash']}[/dim]")
             if "prev_hash" in e:
                 lines.append(f"[b]Prev Hash[/b]: [dim]{e['prev_hash']}[/dim]")
         else:
-            # Optional: show a compact placeholder so user knows hashes are hidden
             if "hash" in e or "prev_hash" in e:
                 lines.append("[dim]Hashes hidden (press h)[/dim]")
 
-        # --- Anything else (fallback) ---
+        # Extras
         known = {
-            "result","reason","ts","ts_iso","origin","session_id","nonce",
-            "claimed_fp","pubkey_fp","alg","request_ip","user_agent",
-            "hash","prev_hash"
+            "result", "reason", "ts", "ts_iso", "origin", "session_id", "nonce",
+            "claimed_fp", "pubkey_fp", "alg", "request_ip", "user_agent",
+            "hash", "prev_hash",
         }
         extras = sorted(k for k in e.keys() if k not in known)
         if extras:
@@ -283,20 +298,12 @@ class DetailsPane(Static):
 # -----------------------------
 
 class AuditTui(App):
+    # We show our own CPUNK header bar; keep TITLE for terminal title only.
     TITLE = f"{__app_name__} v{__version__}"
-    SUB_TITLE = "JSONL audit viewer • follow • pin • filter"
-    # CPUNK-ish green accents (approx) for borders / highlight
+
+    # CPUNK-ish green accents
     CSS = """
     Screen { layout: vertical; }
-
-    Header .header--title {
-        color: #66ff99;
-        text-style: bold;
-    }
-
-    Header .header--subtitle {
-        color: #9be7b0;
-    }
 
     #cpunk_header {
         height: 1;
@@ -304,13 +311,11 @@ class AuditTui(App):
         background: $panel;
     }
 
-
     #cpunk_header.pulse {
         background: #00ff88;
         color: black;
     }
 
-    /* CPUNK green accent */
     $cpunk_green: #00ff66;
 
     #top { height: 3; }
@@ -328,11 +333,20 @@ class AuditTui(App):
 
     #stats { padding: 0 1; }
 
+    /* FILTER INPUT: force high contrast so typed text + cursor are visible */
     #filter {
         width: 1fr;
-        border: round $cpunk_green;
+        background: #222222;
+        color: white;
+        border: round #555555;
     }
 
+    #filter:focus {
+        background: #2a2a2a;
+        border: round #00ff66;
+    }
+
+    /* Global focus accents */
     Input:focus {
         border: round $cpunk_green;
     }
@@ -349,55 +363,11 @@ class AuditTui(App):
         ("u", "unpin", "Unpin"),
         ("h", "toggle_hashes", "Hashes"),
         ("f", "focus_filter", "Filter"),
-        ("space", "show_details", "Details"),
+        ("/", "focus_filter", "Filter"),
+        ("space", "show_details", "Inspect"),
     ]
 
-
-    def action_unpin(self) -> None:
-        self._pin_details = False
-        # jump back to latest row when unpinning
-        self._select_latest()
     paused: bool = reactive(False)
-
-    def _pulse_header(self) -> None:
-        header = self.query_one("#cpunk_header", Static)
-        if header.has_class("pulse"):
-            return  # already pulsing
-
-        header.add_class("pulse")
-
-        # remove pulse shortly after
-        def _clear() -> None:
-            try:
-                header.remove_class("pulse")
-            except Exception:
-                pass
-
-        self.set_timer(0.15, _clear)
-
-    def action_toggle_hashes(self) -> None:
-        self.show_hashes = not self.show_hashes
-
-        # Re-render currently selected/pinned event in the details pane
-        table = self.query_one(DataTable)
-        details = self.query_one(DetailsPane)
-
-        row_index = None
-        if hasattr(table, "cursor_row"):
-            row_index = table.cursor_row
-        elif hasattr(table, "cursor_coordinate"):
-            row_index = table.cursor_coordinate[0]
-
-        if row_index is None or not (0 <= row_index < len(self._visible_keys)):
-            details.show_event(None, show_hashes=self.show_hashes)
-            return
-        self.query_one(StatsBar).hashes_on = self.show_hashes
-
-        key = self._visible_keys[row_index]
-        e = self._row_to_event.get(key)
-        details.show_event(e, show_hashes=self.show_hashes)
-
-
 
     def __init__(self, log_path: str, follow: bool = True, refresh_hz: float = 10.0, max_rows: int = 500):
         super().__init__()
@@ -405,35 +375,48 @@ class AuditTui(App):
         self.follow = follow
         self.refresh_hz = refresh_hz
         self.max_rows = max_rows
+
+        # Pinning: when True, auto-follow selection won't overwrite details
         self._pin_details = False
+
+        # Hash visibility toggle
         self.show_hashes = True
 
-        # start_at_end=False so admins see history on startup
+        # Admins want history first: start_at_end=False
         self.reader = JsonlReader(log_path, start_at_end=False)
+
+        # Hash-link check state
         self.chain = ChainState()
 
-        # row_key -> event
+        # Storage
         self._row_to_event: Dict[int, Dict[str, Any]] = {}
         self._next_row_key = 1
 
-        # keep insertion order for filter rebuilds
+        # Full history (for rebuild when filter changes / keep_tail)
         self._events: List[Dict[str, Any]] = []
 
-        # visible row keys in table order (used to map cursor index -> event)
+        # Visible row keys in table order (cursor index -> event)
         self._visible_keys: List[int] = []
 
+    # --- UI layout
+
     def compose(self) -> ComposeResult:
+        # CPUNK header bar (we control colors via markup)
         yield Static(
             f"[#00ff88][b]{__app_name__} v{__version__}[/b][/#00ff88]  "
             f"[dim]JSONL audit viewer  •  follow  •  pin  •  filter[/dim]",
             id="cpunk_header",
-            )
+        )
+
         with Container(id="top"):
             yield StatsBar(id="stats")
 
         with Horizontal(id="filter_row"):
             yield Static("Filter:", classes="label")
-            yield Input(placeholder="substring match (origin, session_id, fp, reason, result…)", id="filter")
+            yield Input(
+                placeholder="substring match (origin, session_id, fp, reason, result…)",
+                id="filter",
+            )
 
         with Horizontal(id="body"):
             with Vertical(id="left"):
@@ -444,15 +427,21 @@ class AuditTui(App):
                 yield table
 
             with Vertical(id="right"):
-                yield DetailsPane("↑↓ select • Space inspect • / filter • p pause", id="details")
+                yield DetailsPane("↑↓ select • Space inspect • f / filter • p pause • h hashes • u unpin", id="details")
 
         yield Footer()
 
+    # --- Lifecycle
+
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
-        self.reader.open()
+        stats = self.query_one(StatsBar)
+
+        # Initial statuses
+        stats.hashes_on = self.show_hashes
 
         # Load whole file once
+        self.reader.open()
         while True:
             e = self.reader.read_one()
             if e is None:
@@ -460,30 +449,36 @@ class AuditTui(App):
             self._events.append(e)
             self._ingest_event(e, auto_select=False)
 
-        # If we have rows, select the newest and focus the table so Space works immediately
-        if table.row_count > 0:
-            table.cursor_coordinate = (table.row_count - 1, 0)
-
-
-        # Select newest row
+        # Select latest row (if any) and focus the table so Space works without mouse
         self._select_latest()
+        table.focus()
 
-        # Default: follow ON
+        # Start follow mode
         if self.follow:
             self.set_interval(1.0 / self.refresh_hz, self._tick_follow)
 
-        if self._visible_keys:
-            key = self._visible_keys[-1]
-            self.query_one(DetailsPane).show_event(
-                self._row_to_event.get(key),
-                show_hashes=self.show_hashes,
-            )
+    # --- UX helpers
 
-        self.query_one(StatsBar).hashes_on = self.show_hashes
+    def _pulse_header(self) -> None:
+        """Briefly invert the header to signal new events arrived."""
+        header = self.query_one("#cpunk_header", Static)
+        if header.has_class("pulse"):
+            return
+        header.add_class("pulse")
 
-        table.focus()  # <-- key line: no mouse needed
+        def _clear() -> None:
+            try:
+                header.remove_class("pulse")
+            except Exception:
+                pass
 
-    # --- Actions
+        self.set_timer(0.15, _clear)
+
+    def _hint_filter_mode(self) -> None:
+        """Optional UX polish: show a brief hint when filter is focused."""
+        self.query_one(DetailsPane).update("[dim]Filter: type text + Enter to apply • Esc to return[/dim]")
+
+    # --- Actions (key bindings)
 
     def action_toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -511,18 +506,16 @@ class AuditTui(App):
 
     def action_focus_filter(self) -> None:
         self.query_one(Input).focus()
+        self._hint_filter_mode()
 
     def action_show_details(self) -> None:
-        """Show details for the currently highlighted row (works across Textual versions)."""
+        """Pin and show details for the currently highlighted row."""
         self._pin_details = True
         table = self.query_one(DataTable)
         details = self.query_one(DetailsPane)
-        self._pin_details = True
 
-        row_index = None
-        if hasattr(table, "cursor_row"):
-            row_index = table.cursor_row
-        elif hasattr(table, "cursor_coordinate"):
+        row_index = getattr(table, "cursor_row", None)
+        if row_index is None and hasattr(table, "cursor_coordinate"):
             row_index = table.cursor_coordinate[0]
 
         if row_index is None:
@@ -532,42 +525,76 @@ class AuditTui(App):
             key = self._visible_keys[row_index]
             details.show_event(self._row_to_event.get(key), show_hashes=self.show_hashes)
 
-    # --- Events / UI callbacks
+    def action_unpin(self) -> None:
+        """Unpin details and jump back to latest row."""
+        self._pin_details = False
+        self._select_latest()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.query_one(StatsBar).filter_text = event.value.strip()
-        self._rebuild_table()
-        # after rebuild, focus table for navigation
-        self.query_one(DataTable).focus()
+    def action_toggle_hashes(self) -> None:
+        """Toggle hash visibility and re-render current details without changing selection."""
+        self.show_hashes = not self.show_hashes
+        self.query_one(StatsBar).hashes_on = self.show_hashes
 
-    def on_key(self, event: events.Key) -> None:
-        # Esc: leave filter input
-        if event.key == "escape":
-            self.query_one(DataTable).focus()
+        table = self.query_one(DataTable)
+        details = self.query_one(DetailsPane)
+
+        row_index = getattr(table, "cursor_row", None)
+        if row_index is None and hasattr(table, "cursor_coordinate"):
+            row_index = table.cursor_coordinate[0]
+
+        if row_index is None or not (0 <= row_index < len(self._visible_keys)):
+            details.show_event(None, show_hashes=self.show_hashes)
             return
 
-        # If table is focused, force Enter/Return/Space to show details
-        if event.key in "space":
+        key = self._visible_keys[row_index]
+        e = self._row_to_event.get(key)
+        details.show_event(e, show_hashes=self.show_hashes)
+
+    # --- UI callbacks
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Apply filter and rebuild visible table."""
+        if event.input.id != "filter":
+            return
+
+        self.query_one(StatsBar).filter_text = event.value.strip()
+        self._rebuild_table(keep_tail=True)
+
+        # After applying, go back to table navigation
+        self.query_one(DataTable).focus()
+
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.query_one(DataTable).focus()
+            # restore normal hint (or show selected event)
+            if self._visible_keys:
+                key = self._visible_keys[-1]
+                self.query_one(DetailsPane).show_event(self._row_to_event.get(key), show_hashes=self.show_hashes)
+            else:
+                self.query_one(DetailsPane).show_event(None, show_hashes=self.show_hashes)
+            return
+
+        # Space inspect is handled by binding, but some terminals swallow it;
+        # keep this as a fallback to ensure Space works when table is focused.
+        if event.key == "space":
             table = self.query_one(DataTable)
             if table.has_focus:
                 self.action_show_details()
-                event.stop()  # prevent DataTable from swallowing it
+                event.stop()
                 return
 
-
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        # Some Textual versions only emit this on mouse click; still useful when it happens.
-        e = self._row_to_event.get(event.row_key)
-        self.query_one(DetailsPane).show_event(e, show_hashes=self.show_hashes)
-
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        # Optional: live-update details while moving with arrows (htop-like).
+        """Live update details while moving with arrows (unless pinned)."""
+        if self._pin_details:
+            return
         e = self._row_to_event.get(event.row_key)
         self.query_one(DetailsPane).show_event(e, show_hashes=self.show_hashes)
 
     # --- Core logic
 
     def _match_filter(self, e: Dict[str, Any], filt: str) -> bool:
+        """Substring match across common fields."""
         if not filt:
             return True
         blob = " ".join([
@@ -587,6 +614,7 @@ class AuditTui(App):
     def _update_stats(self, e: Dict[str, Any]) -> None:
         stats = self.query_one(StatsBar)
         res = safe_get(e, "result").lower()
+
         stats.events_total += 1
         stats.last_time = safe_get(e, "ts_iso") or ts_to_hhmmss(e.get("ts")) or stats.last_time
 
@@ -602,6 +630,7 @@ class AuditTui(App):
             stats.other += 1
 
     def _check_chain(self, e: Dict[str, Any]) -> bool:
+        """Lightweight prev_hash link check. Returns True if link ok for this event."""
         h = safe_get(e, "hash")
         prev = safe_get(e, "prev_hash")
         ok = True
@@ -614,10 +643,11 @@ class AuditTui(App):
 
         if h:
             self.chain.last_hash = h
-        self.chain.last_ts_iso = safe_get(e, "ts_iso") or self.chain.last_ts_iso
+
         return ok
 
     def _ingest_event(self, e: Dict[str, Any], auto_select: bool = True) -> None:
+        """Update stats/chain and add to table if it matches current filter."""
         self._update_stats(e)
         chain_ok = self._check_chain(e)
         self._add_row(e, chain_ok, auto_select=auto_select)
@@ -627,6 +657,7 @@ class AuditTui(App):
         stats.chain_breaks = self.chain.breaks
 
     def _add_row(self, e: Dict[str, Any], chain_ok: bool, auto_select: bool = True) -> None:
+        """Append a row to the table (if it matches filter)."""
         table = self.query_one(DataTable)
         stats = self.query_one(StatsBar)
         filt = stats.filter_text
@@ -662,35 +693,36 @@ class AuditTui(App):
             key=row_key,
         )
 
-
-        # Trim visible table list to max_rows (and keep _visible_keys in sync)
-        while table.row_count > self.max_rows and self._visible_keys:
-            # DataTable APIs differ; easiest is to clear/rebuild if it grows too big.
-            # But for steady follow, we can rebuild occasionally. Here: do a simple rebuild.
-            break
-
+        # Bound growth in busy environments: if it exceeds max_rows, rebuild tail.
         if table.row_count > self.max_rows:
             self._rebuild_table(keep_tail=True)
             return
 
+        # Auto-follow newest row unless pinned
         if auto_select and not self._pin_details:
             table.cursor_coordinate = (table.row_count - 1, 0)
             self.query_one(DetailsPane).show_event(e, show_hashes=self.show_hashes)
 
-
     def _select_latest(self) -> None:
+        """Select last visible row and refresh details (unless pinned)."""
         table = self.query_one(DataTable)
         if table.row_count <= 0:
             return
+
         table.cursor_coordinate = (table.row_count - 1, 0)
 
-        # update details for the highlighted row
+        if self._pin_details:
+            return
+
         if self._visible_keys:
             key = self._visible_keys[-1]
             self.query_one(DetailsPane).show_event(self._row_to_event.get(key), show_hashes=self.show_hashes)
 
     def _rebuild_table(self, keep_tail: bool = False) -> None:
-        """Rebuild table from self._events, applying filter. keep_tail keeps only last max_rows matches."""
+        """Rebuild table from history applying current filter.
+
+        keep_tail=True keeps only last max_rows matches (best for busy follow mode).
+        """
         table = self.query_one(DataTable)
         filt = self.query_one(StatsBar).filter_text
 
@@ -701,14 +733,13 @@ class AuditTui(App):
         self._visible_keys.clear()
         self._next_row_key = 1
 
-        # Decide which events to render
+        # Keep only last matches if requested
         src = self._events
         if keep_tail and self.max_rows > 0:
-            # keep only last max_rows events that match filter
-            matched = [e for e in src if self._match_filter(e, filt)]
-            src = matched[-self.max_rows :]
+            matched = [ev for ev in src if self._match_filter(ev, filt)]
+            src = matched[-self.max_rows:]
 
-        # Recompute chain display in view order
+        # Recompute chain indicator in the rebuilt view
         temp_chain = ChainState()
 
         def check_chain_local(ev: Dict[str, Any]) -> bool:
@@ -722,25 +753,21 @@ class AuditTui(App):
                 temp_chain.last_hash = h
             return ok
 
-        for e in src:
-            if not self._match_filter(e, filt):
+        # NOTE: rebuild should NOT change counters; we only rebuild the view.
+        for ev in src:
+            if not self._match_filter(ev, filt):
                 continue
-            chain_ok = check_chain_local(e)
+            chain_ok = check_chain_local(ev)
+            self._add_row(ev, chain_ok, auto_select=False)
 
-            # Add row without auto-select spam
-            self._update_stats_no_increment(e)  # no-op placeholder (see below)
-            self._add_row(e, chain_ok, auto_select=False)
-
-        # If we used the hacky _update_stats_no_increment, ensure details updates anyway
-        self._select_latest()
+        # After rebuild, select latest (if any)
         if table.row_count == 0:
-            self.query_one(DetailsPane).show_event(None)
-
-    def _update_stats_no_increment(self, e: Dict[str, Any]) -> None:
-        # Rebuild should not change counters; intentionally empty.
-        return
+            self.query_one(DetailsPane).show_event(None, show_hashes=self.show_hashes)
+        else:
+            self._select_latest()
 
     def _tick_follow(self) -> None:
+        """Follow mode tick: read and ingest new JSONL lines."""
         stats = self.query_one(StatsBar)
         stats.paused = self.paused
         stats.chain_ok = self.chain.ok
@@ -759,13 +786,24 @@ class AuditTui(App):
             self._events.append(e)
             self._ingest_event(e, auto_select=True)
 
-        # Pulse header once if we received any new events this tick
         if got_new:
             self._pulse_header()
 
-        # Keep table bounded in busy environments
-        if self.query_one(DataTable).row_count > self.max_rows:
-            self._rebuild_table(keep_tail=True)
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Live echo of filter text so the user always sees what they're typing."""
+        if event.input.id != "filter":
+            return
+
+        text = event.value
+
+        # Show live filter text in stats bar too (without applying yet)
+        self.query_one(StatsBar).filter_text = text.strip()
+
+        # Echo clearly in the details pane while typing
+        self.query_one(DetailsPane).update(
+            f"[b]Filter[/b]: [#00ff88]{text or '(empty)'}[/#00ff88]\n"
+            f"[dim]Enter = apply • Esc = return to table[/dim]"
+        )
 
 
 def main() -> None:
@@ -775,7 +813,6 @@ def main() -> None:
     ap.add_argument("--hz", type=float, default=10.0, help="Follow refresh rate (default: 10)")
     ap.add_argument("--max-rows", type=int, default=500, help="Max visible rows (default: 500)")
     ap.add_argument("--version", action="store_true", help="Print version and exit")
-
     args = ap.parse_args()
 
     if args.version:
@@ -784,7 +821,6 @@ def main() -> None:
 
     if not args.logfile:
         ap.error("the following arguments are required: logfile")
-
 
     if not os.path.exists(args.logfile):
         raise SystemExit(f"Log file not found: {args.logfile}")
