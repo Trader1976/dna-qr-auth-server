@@ -1,5 +1,6 @@
 
 <img width="492" height="539" alt="qr_auth" src="https://github.com/user-attachments/assets/1799f306-61e7-4de8-99ee-71e2965f6496" />
+<img width="1360" height="708" alt="audit_tui" src="https://github.com/user-attachments/assets/c15c6168-5fa3-4e1a-8cbd-c24c33934eb6" />
 
 
 # DNA QR Authentication Server
