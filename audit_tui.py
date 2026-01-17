@@ -29,6 +29,8 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import DataTable, Footer, Header, Input, Static
 
+__app_name__ = "DNA QR Auth Audit TUI"
+__version__ = "1.0.0"
 
 # -----------------------------
 # Utilities
@@ -184,7 +186,7 @@ class StatsBar(Static):
 
 
 class DetailsPane(Static):
-    def show_event(self, e: Optional[Dict[str, Any]]) -> None:
+    def show_event(self, e: Optional[Dict[str, Any]], show_hashes: bool = True) -> None:
         if not e:
             self.update("↑↓ select • Space inspect • / filter • p pause")
             return
@@ -244,11 +246,16 @@ class DetailsPane(Static):
 
         lines.append("")
 
-        # --- Hash chain ---
-        if "hash" in e:
-            lines.append(f"[b]Hash[/b]: [dim]{e['hash']}[/dim]")
-        if "prev_hash" in e:
-            lines.append(f"[b]Prev Hash[/b]: [dim]{e['prev_hash']}[/dim]")
+        # --- Hash chain (toggleable) ---
+        if show_hashes:
+            if "hash" in e:
+                lines.append(f"[b]Hash[/b]: [dim]{e['hash']}[/dim]")
+            if "prev_hash" in e:
+                lines.append(f"[b]Prev Hash[/b]: [dim]{e['prev_hash']}[/dim]")
+        else:
+            # Optional: show a compact placeholder so user knows hashes are hidden
+            if "hash" in e or "prev_hash" in e:
+                lines.append("[dim]Hashes hidden (press h)[/dim]")
 
         # --- Anything else (fallback) ---
         known = {
@@ -271,9 +278,32 @@ class DetailsPane(Static):
 # -----------------------------
 
 class AuditTui(App):
+    TITLE = f"{__app_name__} v{__version__}"
+    SUB_TITLE = "JSONL audit viewer • follow • pin • filter"
     # CPUNK-ish green accents (approx) for borders / highlight
     CSS = """
     Screen { layout: vertical; }
+
+    Header .header--title {
+        color: #66ff99;
+        text-style: bold;
+    }
+
+    Header .header--subtitle {
+        color: #9be7b0;
+    }
+
+    #cpunk_header {
+        height: 1;
+        padding: 0 1;
+        background: $panel;
+    }
+
+
+    #cpunk_header.pulse {
+        background: #00ff88;
+        color: black;
+    }
 
     /* CPUNK green accent */
     $cpunk_green: #00ff66;
@@ -312,6 +342,7 @@ class AuditTui(App):
         ("p", "toggle_pause", "Pause"),
         ("c", "clear", "Clear"),
         ("u", "unpin", "Unpin"),
+        ("h", "toggle_hashes", "Hashes"),
         ("f", "focus_filter", "Filter"),
         ("space", "show_details", "Details"),
     ]
@@ -323,6 +354,45 @@ class AuditTui(App):
         self._select_latest()
     paused: bool = reactive(False)
 
+    def _pulse_header(self) -> None:
+        header = self.query_one("#cpunk_header", Static)
+        if header.has_class("pulse"):
+            return  # already pulsing
+
+        header.add_class("pulse")
+
+        # remove pulse shortly after
+        def _clear() -> None:
+            try:
+                header.remove_class("pulse")
+            except Exception:
+                pass
+
+        self.set_timer(0.15, _clear)
+
+    def action_toggle_hashes(self) -> None:
+        self.show_hashes = not self.show_hashes
+
+        # Re-render currently selected/pinned event in the details pane
+        table = self.query_one(DataTable)
+        details = self.query_one(DetailsPane)
+
+        row_index = None
+        if hasattr(table, "cursor_row"):
+            row_index = table.cursor_row
+        elif hasattr(table, "cursor_coordinate"):
+            row_index = table.cursor_coordinate[0]
+
+        if row_index is None or not (0 <= row_index < len(self._visible_keys)):
+            details.show_event(None)
+            return
+
+        key = self._visible_keys[row_index]
+        e = self._row_to_event.get(key)
+        details.show_event(e, show_hashes=self.show_hashes)
+
+
+
     def __init__(self, log_path: str, follow: bool = True, refresh_hz: float = 10.0, max_rows: int = 500):
         super().__init__()
         self.log_path = log_path
@@ -330,6 +400,8 @@ class AuditTui(App):
         self.refresh_hz = refresh_hz
         self.max_rows = max_rows
         self._pin_details = False
+        self.show_hashes = True
+
         # start_at_end=False so admins see history on startup
         self.reader = JsonlReader(log_path, start_at_end=False)
         self.chain = ChainState()
@@ -345,8 +417,11 @@ class AuditTui(App):
         self._visible_keys: List[int] = []
 
     def compose(self) -> ComposeResult:
-        yield Header()
-
+        yield Static(
+            f"[#00ff88][b]{__app_name__} v{__version__}[/b][/#00ff88]  "
+            f"[dim]JSONL audit viewer  •  follow  •  pin  •  filter[/dim]",
+            id="cpunk_header",
+            )
         with Container(id="top"):
             yield StatsBar(id="stats")
 
@@ -393,9 +468,12 @@ class AuditTui(App):
 
         if self._visible_keys:
             key = self._visible_keys[-1]
-            self.query_one(DetailsPane).show_event(self._row_to_event.get(key))
+            self.query_one(DetailsPane).show_event(
+                self._row_to_event.get(key),
+                show_hashes=self.show_hashes,
+            )
 
-    
+
         table.focus()  # <-- key line: no mouse needed
 
     # --- Actions
@@ -473,7 +551,7 @@ class AuditTui(App):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         # Some Textual versions only emit this on mouse click; still useful when it happens.
         e = self._row_to_event.get(event.row_key)
-        self.query_one(DetailsPane).show_event(e)
+        self.query_one(DetailsPane).show_event(e, show_hashes=self.show_hashes)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         # Optional: live-update details while moving with arrows (htop-like).
@@ -590,7 +668,8 @@ class AuditTui(App):
 
         if auto_select and not self._pin_details:
             table.cursor_coordinate = (table.row_count - 1, 0)
-            self.query_one(DetailsPane).show_event(e)
+            self.query_one(DetailsPane).show_event(e, show_hashes=self.show_hashes)
+
 
     def _select_latest(self) -> None:
         table = self.query_one(DataTable)
@@ -663,13 +742,19 @@ class AuditTui(App):
         if self.paused:
             return
 
+        got_new = False
         N = 500
         for _ in range(N):
             e = self.reader.read_one()
             if e is None:
                 break
+            got_new = True
             self._events.append(e)
             self._ingest_event(e, auto_select=True)
+
+        # Pulse header once if we received any new events this tick
+        if got_new:
+            self._pulse_header()
 
         # Keep table bounded in busy environments
         if self.query_one(DataTable).row_count > self.max_rows:
@@ -678,11 +763,21 @@ class AuditTui(App):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="DNA QR Auth Audit Log TUI (Textual)")
-    ap.add_argument("logfile", help="Path to JSONL audit log file")
+    ap.add_argument("logfile", nargs="?", help="Path to JSONL audit log file")
     ap.add_argument("--no-follow", action="store_true", help="Load once and do NOT follow new lines")
     ap.add_argument("--hz", type=float, default=10.0, help="Follow refresh rate (default: 10)")
     ap.add_argument("--max-rows", type=int, default=500, help="Max visible rows (default: 500)")
+    ap.add_argument("--version", action="store_true", help="Print version and exit")
+
     args = ap.parse_args()
+
+    if args.version:
+        print(f"{__app_name__} {__version__}")
+        return
+
+    if not args.logfile:
+        ap.error("the following arguments are required: logfile")
+
 
     if not os.path.exists(args.logfile):
         raise SystemExit(f"Log file not found: {args.logfile}")

@@ -8,9 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY ./app /app/app
-COPY ./requirements.txt /app/requirements.txt
 
-RUN pip install --no-cache-dir -r requirements.txt
+#COPY ./requirements.txt /app/requirements.txt
+#RUN pip install --no-cache-dir -r requirements.txt
+
+COPY ./requirements-server.txt /app/requirements-server.txt
+RUN pip install --no-cache-dir -r requirements-server.txt
+
 
 # Build native verifier from PQClean (ML-DSA-87)
 RUN cd /app/app/native && gcc -O2 -fPIC -shared \
@@ -22,4 +26,5 @@ RUN cd /app/app/native && gcc -O2 -fPIC -shared \
     -o /app/app/native/libdna_pq_verify.so
 
 EXPOSE 9000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000"]
+#CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9000"]
